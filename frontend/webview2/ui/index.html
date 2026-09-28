@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>OBS — WebView2</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header><nav id="menus" aria-label="Меню OBS"></nav><button id="original" class="subtle">Основное окно OBS</button></header>
+  <div id="error" role="alert" hidden></div>
+  <main>
+    <section class="preview-area" aria-label="Предпросмотр сцены">
+      <div class="preview-title"><span id="scene-title">OBS Studio</span><span id="studio-mode"></span></div>
+      <div id="preview"></div>
+    </section>
+    <div class="panels">
+      <section class="panel"><h2 id="scenes-title">Сцены</h2><div id="scenes" class="rows" role="listbox" aria-labelledby="scenes-title"></div></section>
+      <section class="panel"><h2 id="sources-title">Источники</h2><div id="sources" class="rows" role="listbox" aria-labelledby="sources-title"></div>
+        <div class="toolbar"><button id="properties" disabled>Свойства</button><button id="filters" disabled>Фильтры</button></div>
+      </section>
+      <section class="panel controls-panel"><h2 id="controls-title">Управление</h2><div id="controls"></div></section>
+    </div>
+  </main>
+  <footer><span id="connection" role="status">Подключение к OBS…</span><span id="status"></span></footer>
+</body>
+</html>

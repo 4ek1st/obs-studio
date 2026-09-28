@@ -1,0 +1,735 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "50530ce9046599e698c5d2068e4f053fae2318f6",
+  "sourceVersion": "33.0.0-beta4",
+  "scope": "Static source inventory; dynamic menus, plugins and runtime feature availability require separate validation.",
+  "forms": [
+    {
+      "file": "frontend/forms/AutoConfigFinishPage.ui",
+      "rootClass": "QWidget",
+      "widgets": 2,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/AutoConfigStartPage.ui",
+      "rootClass": "QWidget",
+      "widgets": 5,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/AutoConfigStreamPage.ui",
+      "rootClass": "QWidget",
+      "widgets": 38,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/AutoConfigTestPage.ui",
+      "rootClass": "QWidget",
+      "widgets": 11,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/AutoConfigVideoPage.ui",
+      "rootClass": "QWidget",
+      "widgets": 6,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/ColorSelect.ui",
+      "rootClass": "QWidget",
+      "widgets": 9,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/LogUploadDialog.ui",
+      "rootClass": "QDialog",
+      "widgets": 17,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSAbout.ui",
+      "rootClass": "QWidget",
+      "widgets": 13,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSAdvAudio.ui",
+      "rootClass": "QDialog",
+      "widgets": 16,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSBasic.ui",
+      "rootClass": "QMainWindow",
+      "widgets": 65,
+      "actions": 102
+    },
+    {
+      "file": "frontend/forms/OBSBasicControls.ui",
+      "rootClass": "QWidget",
+      "widgets": 12,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSBasicFilters.ui",
+      "rootClass": "QDialog",
+      "widgets": 24,
+      "actions": 4
+    },
+    {
+      "file": "frontend/forms/OBSBasicInteraction.ui",
+      "rootClass": "QDialog",
+      "widgets": 2,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSBasicProperties.ui",
+      "rootClass": "QDialog",
+      "widgets": 9,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSBasicSettings.ui",
+      "rootClass": "QDialog",
+      "widgets": 540,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSBasicSourceSelect.ui",
+      "rootClass": "QDialog",
+      "widgets": 21,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSBasicTransform.ui",
+      "rootClass": "QDialog",
+      "widgets": 38,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSBasicVCamConfig.ui",
+      "rootClass": "QDialog",
+      "widgets": 7,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSExtraBrowsers.ui",
+      "rootClass": "QDialog",
+      "widgets": 5,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSIdianPlayground.ui",
+      "rootClass": "QDialog",
+      "widgets": 3,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSImporter.ui",
+      "rootClass": "QDialog",
+      "widgets": 5,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSLogViewer.ui",
+      "rootClass": "QDialog",
+      "widgets": 6,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSMissingFiles.ui",
+      "rootClass": "QDialog",
+      "widgets": 8,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSPermissions.ui",
+      "rootClass": "QDialog",
+      "widgets": 18,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSRemux.ui",
+      "rootClass": "QDialog",
+      "widgets": 5,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSUpdate.ui",
+      "rootClass": "QDialog",
+      "widgets": 7,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/OBSYoutubeActions.ui",
+      "rootClass": "QDialog",
+      "widgets": 45,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/PluginManagerWindow.ui",
+      "rootClass": "QDialog",
+      "widgets": 17,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/StatusBarWidget.ui",
+      "rootClass": "QWidget",
+      "widgets": 20,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/source-toolbar/browser-source-toolbar.ui",
+      "rootClass": "QWidget",
+      "widgets": 3,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/source-toolbar/color-source-toolbar.ui",
+      "rootClass": "QWidget",
+      "widgets": 3,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/source-toolbar/device-select-toolbar.ui",
+      "rootClass": "QWidget",
+      "widgets": 4,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/source-toolbar/game-capture-toolbar.ui",
+      "rootClass": "QWidget",
+      "widgets": 5,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/source-toolbar/image-source-toolbar.ui",
+      "rootClass": "QWidget",
+      "widgets": 4,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/source-toolbar/media-controls.ui",
+      "rootClass": "QWidget",
+      "widgets": 10,
+      "actions": 0
+    },
+    {
+      "file": "frontend/forms/source-toolbar/text-source-toolbar.ui",
+      "rootClass": "QWidget",
+      "widgets": 5,
+      "actions": 0
+    }
+  ],
+  "mainWindowActions": [
+    {
+      "id": "actionCopySource",
+      "textKey": "Copy"
+    },
+    {
+      "id": "actionPasteRef",
+      "textKey": "PasteReference"
+    },
+    {
+      "id": "actionCopyFilters",
+      "textKey": "Copy.Filters"
+    },
+    {
+      "id": "actionPasteFilters",
+      "textKey": "Paste.Filters"
+    },
+    {
+      "id": "resetUI",
+      "textKey": "Basic.MainMenu.View.ResetUI"
+    },
+    {
+      "id": "actionFullscreenInterface",
+      "textKey": "Basic.MainMenu.View.Fullscreen.Interface"
+    },
+    {
+      "id": "actionAddScene",
+      "textKey": "Add"
+    },
+    {
+      "id": "actionAddSource",
+      "textKey": "Add"
+    },
+    {
+      "id": "actionRemoveScene",
+      "textKey": "Remove"
+    },
+    {
+      "id": "actionRemoveSource",
+      "textKey": "Remove"
+    },
+    {
+      "id": "actionSourceProperties",
+      "textKey": "Properties"
+    },
+    {
+      "id": "actionSceneUp",
+      "textKey": "MoveUp"
+    },
+    {
+      "id": "actionSourceUp",
+      "textKey": "MoveUp"
+    },
+    {
+      "id": "actionSceneDown",
+      "textKey": "MoveDown"
+    },
+    {
+      "id": "actionSourceDown",
+      "textKey": "MoveDown"
+    },
+    {
+      "id": "actionShow_Recordings",
+      "textKey": "Basic.MainMenu.File.ShowRecordings"
+    },
+    {
+      "id": "actionRemux",
+      "textKey": "Basic.MainMenu.File.Remux"
+    },
+    {
+      "id": "action_Settings",
+      "textKey": "Basic.MainMenu.File.Settings"
+    },
+    {
+      "id": "actionE_xit",
+      "textKey": "Basic.MainMenu.File.Exit"
+    },
+    {
+      "id": "actionShowLogs",
+      "textKey": "Basic.MainMenu.Help.Logs.ShowLogs"
+    },
+    {
+      "id": "actionUploadLastLog",
+      "textKey": "Basic.MainMenu.Help.Logs.UploadLastLog"
+    },
+    {
+      "id": "actionUploadCurrentLog",
+      "textKey": "Basic.MainMenu.Help.Logs.UploadCurrentLog"
+    },
+    {
+      "id": "actionViewCurrentLog",
+      "textKey": "Basic.MainMenu.Help.Logs.ViewCurrentLog"
+    },
+    {
+      "id": "actionUndo",
+      "textKey": "Basic.MainMenu.Edit.Undo"
+    },
+    {
+      "id": "actionRedo",
+      "textKey": "Basic.MainMenu.Edit.Redo"
+    },
+    {
+      "id": "actionEditTransform",
+      "textKey": "Basic.MainMenu.Edit.Transform.EditTransform"
+    },
+    {
+      "id": "actionCopyTransform",
+      "textKey": "Basic.MainMenu.Edit.Transform.CopyTransform"
+    },
+    {
+      "id": "actionPasteTransform",
+      "textKey": "Basic.MainMenu.Edit.Transform.PasteTransform"
+    },
+    {
+      "id": "actionRotate90CW",
+      "textKey": "Basic.MainMenu.Edit.Transform.Rotate90CW"
+    },
+    {
+      "id": "actionRotate90CCW",
+      "textKey": "Basic.MainMenu.Edit.Transform.Rotate90CCW"
+    },
+    {
+      "id": "actionRotate180",
+      "textKey": "Basic.MainMenu.Edit.Transform.Rotate180"
+    },
+    {
+      "id": "actionFitToScreen",
+      "textKey": "Basic.MainMenu.Edit.Transform.FitToScreen"
+    },
+    {
+      "id": "actionStretchToScreen",
+      "textKey": "Basic.MainMenu.Edit.Transform.StretchToScreen"
+    },
+    {
+      "id": "actionResetTransform",
+      "textKey": "Basic.MainMenu.Edit.Transform.ResetTransform"
+    },
+    {
+      "id": "actionCenterToScreen",
+      "textKey": "Basic.MainMenu.Edit.Transform.CenterToScreen"
+    },
+    {
+      "id": "actionVerticalCenter",
+      "textKey": "Basic.MainMenu.Edit.Transform.VerticalCenter"
+    },
+    {
+      "id": "actionHorizontalCenter",
+      "textKey": "Basic.MainMenu.Edit.Transform.HorizontalCenter"
+    },
+    {
+      "id": "actionFlipHorizontal",
+      "textKey": "Basic.MainMenu.Edit.Transform.FlipHorizontal"
+    },
+    {
+      "id": "actionFlipVertical",
+      "textKey": "Basic.MainMenu.Edit.Transform.FlipVertical"
+    },
+    {
+      "id": "actionMoveUp",
+      "textKey": "Basic.MainMenu.Edit.Order.MoveUp"
+    },
+    {
+      "id": "actionMoveDown",
+      "textKey": "Basic.MainMenu.Edit.Order.MoveDown"
+    },
+    {
+      "id": "actionMoveToTop",
+      "textKey": "Basic.MainMenu.Edit.Order.MoveToTop"
+    },
+    {
+      "id": "actionMoveToBottom",
+      "textKey": "Basic.MainMenu.Edit.Order.MoveToBottom"
+    },
+    {
+      "id": "actionCheckForUpdates",
+      "textKey": "Basic.MainMenu.Help.CheckForUpdates"
+    },
+    {
+      "id": "actionShowMacPermissions",
+      "textKey": "MacPermissions.MenuAction"
+    },
+    {
+      "id": "actionRepair",
+      "textKey": "Basic.MainMenu.Help.Repair"
+    },
+    {
+      "id": "actionRestartSafe",
+      "textKey": "Basic.MainMenu.Help.RestartSafeMode"
+    },
+    {
+      "id": "actionReleaseNotes",
+      "textKey": "Basic.MainMenu.Help.ReleaseNotes"
+    },
+    {
+      "id": "actionInteract",
+      "textKey": "Interact"
+    },
+    {
+      "id": "actionAdvAudioProperties",
+      "textKey": "Basic.MainMenu.Edit.AdvAudio"
+    },
+    {
+      "id": "actionWebsite",
+      "textKey": "Basic.MainMenu.Help.Website"
+    },
+    {
+      "id": "actionNewSceneCollection",
+      "textKey": "New"
+    },
+    {
+      "id": "actionDupSceneCollection",
+      "textKey": "Duplicate"
+    },
+    {
+      "id": "actionRenameSceneCollection",
+      "textKey": "Rename"
+    },
+    {
+      "id": "actionRemoveSceneCollection",
+      "textKey": "Remove"
+    },
+    {
+      "id": "actionImportSceneCollection",
+      "textKey": "Basic.MainMenu.Import"
+    },
+    {
+      "id": "actionExportSceneCollection",
+      "textKey": "Basic.MainMenu.Export"
+    },
+    {
+      "id": "actionShowMissingFiles",
+      "textKey": "Basic.MainMenu.File.ShowMissingFiles"
+    },
+    {
+      "id": "actionRemigrateSceneCollection",
+      "textKey": "Basic.MainMenu.SceneCollection.Remigrate"
+    },
+    {
+      "id": "actionNewProfile",
+      "textKey": "New"
+    },
+    {
+      "id": "actionDupProfile",
+      "textKey": "Duplicate"
+    },
+    {
+      "id": "actionRenameProfile",
+      "textKey": "Rename"
+    },
+    {
+      "id": "actionRemoveProfile",
+      "textKey": "Remove"
+    },
+    {
+      "id": "actionImportProfile",
+      "textKey": "Basic.MainMenu.Import"
+    },
+    {
+      "id": "actionExportProfile",
+      "textKey": "Basic.MainMenu.Export"
+    },
+    {
+      "id": "actionShowSettingsFolder",
+      "textKey": "Basic.MainMenu.File.ShowSettingsFolder"
+    },
+    {
+      "id": "actionShowProfileFolder",
+      "textKey": "Basic.MainMenu.File.ShowProfileFolder"
+    },
+    {
+      "id": "actionAlwaysOnTop",
+      "textKey": "Basic.MainMenu.View.AlwaysOnTop"
+    },
+    {
+      "id": "toggleListboxToolbars",
+      "textKey": "Basic.MainMenu.View.ListboxToolbars"
+    },
+    {
+      "id": "toggleStatusBar",
+      "textKey": "Basic.MainMenu.View.StatusBar"
+    },
+    {
+      "id": "actionLockPreview",
+      "textKey": "Basic.MainMenu.Edit.LockPreview"
+    },
+    {
+      "id": "actionScaleWindow",
+      "textKey": "Basic.MainMenu.Edit.Scale.Window"
+    },
+    {
+      "id": "actionScaleCanvas",
+      "textKey": "Basic.MainMenu.Edit.Scale.Canvas"
+    },
+    {
+      "id": "actionScaleOutput",
+      "textKey": "Basic.MainMenu.Edit.Scale.Output"
+    },
+    {
+      "id": "actionPasteDup",
+      "textKey": "PasteDuplicate"
+    },
+    {
+      "id": "idianPlayground",
+      "textKey": "Idian Playground"
+    },
+    {
+      "id": "autoConfigure2",
+      "textKey": "Basic.AutoConfig"
+    },
+    {
+      "id": "autoConfigure",
+      "textKey": "Basic.AutoConfig"
+    },
+    {
+      "id": "actionOpenPluginManager",
+      "textKey": "Basic.OpenPluginManager"
+    },
+    {
+      "id": "stats",
+      "textKey": "Basic.Stats"
+    },
+    {
+      "id": "resetDocks",
+      "textKey": "Basic.MainMenu.Docks.ResetDocks"
+    },
+    {
+      "id": "lockDocks",
+      "textKey": "Basic.MainMenu.Docks.LockDocks"
+    },
+    {
+      "id": "sideDocks",
+      "textKey": "Basic.MainMenu.Docks.SideDocks"
+    },
+    {
+      "id": "actionHelpPortal",
+      "textKey": "Basic.MainMenu.Help.HelpPortal"
+    },
+    {
+      "id": "actionShowCrashLogs",
+      "textKey": "Basic.MainMenu.Help.CrashLogs.ShowLogs"
+    },
+    {
+      "id": "actionUploadLastCrashLog",
+      "textKey": "Basic.MainMenu.Help.CrashLogs.UploadLastLog"
+    },
+    {
+      "id": "actionDiscord",
+      "textKey": "Basic.MainMenu.Help.Discord"
+    },
+    {
+      "id": "actionShowWhatsNew",
+      "textKey": "Basic.MainMenu.Help.WhatsNew"
+    },
+    {
+      "id": "actionShowAbout",
+      "textKey": "Basic.MainMenu.Help.About"
+    },
+    {
+      "id": "toggleSourceIcons",
+      "textKey": "Basic.MainMenu.View.SourceIcons"
+    },
+    {
+      "id": "toggleContextToolbars",
+      "textKey": "Basic.MainMenu.View.Toolbars.Context"
+    },
+    {
+      "id": "toggleContextBar",
+      "textKey": "Basic.MainMenu.View.ContextBar"
+    },
+    {
+      "id": "actionMainUndo",
+      "textKey": "Undo.Undo"
+    },
+    {
+      "id": "actionMainRedo",
+      "textKey": "Undo.Redo"
+    },
+    {
+      "id": "actionMixerToolbarAdvAudio",
+      "textKey": "AdvAudioProps"
+    },
+    {
+      "id": "actionSceneFilters",
+      "textKey": "SceneFilters"
+    },
+    {
+      "id": "actionSceneGridMode",
+      "textKey": "Grid"
+    },
+    {
+      "id": "actionSceneListMode",
+      "textKey": "List"
+    },
+    {
+      "id": "actionPreview",
+      "textKey": "Preview"
+    },
+    {
+      "id": "actionPreviewZoomIn",
+      "textKey": "Basic.MainMenu.Edit.Scale.ZoomIn"
+    },
+    {
+      "id": "actionPreviewZoomOut",
+      "textKey": "Basic.MainMenu.Edit.Scale.ZoomOut"
+    },
+    {
+      "id": "actionPreviewResetZoom",
+      "textKey": "Basic.MainMenu.Edit.Scale.ResetZoom"
+    }
+  ],
+  "frontendApiFunctions": [
+    "obs_frontend_get_main_window",
+    "obs_frontend_get_main_window_handle",
+    "obs_frontend_get_system_tray",
+    "obs_frontend_get_scene_names",
+    "obs_frontend_get_scenes",
+    "obs_frontend_get_current_scene",
+    "obs_frontend_set_current_scene",
+    "obs_frontend_get_transitions",
+    "obs_frontend_get_current_transition",
+    "obs_frontend_set_current_transition",
+    "obs_frontend_get_transition_duration",
+    "obs_frontend_set_transition_duration",
+    "obs_frontend_release_tbar",
+    "obs_frontend_set_tbar_position",
+    "obs_frontend_get_tbar_position",
+    "obs_frontend_get_scene_collections",
+    "obs_frontend_get_current_scene_collection",
+    "obs_frontend_set_current_scene_collection",
+    "obs_frontend_add_scene_collection",
+    "obs_frontend_get_profiles",
+    "obs_frontend_get_current_profile",
+    "obs_frontend_get_current_profile_path",
+    "obs_frontend_set_current_profile",
+    "obs_frontend_create_profile",
+    "obs_frontend_duplicate_profile",
+    "obs_frontend_delete_profile",
+    "obs_frontend_add_tools_menu_qaction",
+    "obs_frontend_add_tools_menu_item",
+    "obs_frontend_add_dock_by_id",
+    "obs_frontend_remove_dock",
+    "obs_frontend_add_custom_qdock",
+    "obs_frontend_add_event_callback",
+    "obs_frontend_remove_event_callback",
+    "obs_frontend_add_save_callback",
+    "obs_frontend_remove_save_callback",
+    "obs_frontend_add_preload_callback",
+    "obs_frontend_remove_preload_callback",
+    "obs_frontend_push_ui_translation",
+    "obs_frontend_pop_ui_translation",
+    "obs_frontend_streaming_start",
+    "obs_frontend_streaming_stop",
+    "obs_frontend_streaming_active",
+    "obs_frontend_recording_start",
+    "obs_frontend_recording_stop",
+    "obs_frontend_recording_active",
+    "obs_frontend_recording_pause",
+    "obs_frontend_recording_paused",
+    "obs_frontend_recording_split_file",
+    "obs_frontend_recording_add_chapter",
+    "obs_frontend_replay_buffer_start",
+    "obs_frontend_replay_buffer_save",
+    "obs_frontend_replay_buffer_stop",
+    "obs_frontend_replay_buffer_active",
+    "obs_frontend_open_projector",
+    "obs_frontend_save",
+    "obs_frontend_defer_save_begin",
+    "obs_frontend_defer_save_end",
+    "obs_frontend_get_streaming_output",
+    "obs_frontend_get_recording_output",
+    "obs_frontend_get_replay_buffer_output",
+    "obs_frontend_get_profile_config",
+    "obs_frontend_get_global_config",
+    "obs_frontend_get_app_config",
+    "obs_frontend_get_user_config",
+    "obs_frontend_set_streaming_service",
+    "obs_frontend_get_streaming_service",
+    "obs_frontend_save_streaming_service",
+    "obs_frontend_preview_program_mode_active",
+    "obs_frontend_set_preview_program_mode",
+    "obs_frontend_preview_program_trigger_transition",
+    "obs_frontend_set_preview_enabled",
+    "obs_frontend_preview_enabled",
+    "obs_frontend_get_current_preview_scene",
+    "obs_frontend_set_current_preview_scene",
+    "obs_frontend_take_screenshot",
+    "obs_frontend_take_source_screenshot",
+    "obs_frontend_get_virtualcam_output",
+    "obs_frontend_start_virtualcam",
+    "obs_frontend_stop_virtualcam",
+    "obs_frontend_virtualcam_active",
+    "obs_frontend_reset_video",
+    "obs_frontend_open_source_properties",
+    "obs_frontend_open_source_filters",
+    "obs_frontend_open_source_interaction",
+    "obs_frontend_open_sceneitem_edit_transform",
+    "obs_frontend_get_current_record_output_path",
+    "obs_frontend_get_locale_string",
+    "obs_frontend_is_theme_dark",
+    "obs_frontend_get_last_recording",
+    "obs_frontend_get_last_screenshot",
+    "obs_frontend_get_last_replay",
+    "obs_frontend_add_undo_redo_action",
+    "obs_frontend_get_canvases",
+    "obs_frontend_add_canvas",
+    "obs_frontend_remove_canvas",
+    "obs_frontend_copy_sceneitem",
+    "obs_frontend_can_paste_sceneitem",
+    "obs_frontend_paste_sceneitem",
+    "obs_frontend_is_safe_mode_enabled"
+  ]
+}

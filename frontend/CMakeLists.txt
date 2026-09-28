@@ -78,6 +78,7 @@ target_sources(
 
 if(OS_WINDOWS)
   include(cmake/os-windows.cmake)
+  include(cmake/feature-webview2.cmake)
 elseif(OS_MACOS)
   include(cmake/os-macos.cmake)
 elseif(OS_LINUX)

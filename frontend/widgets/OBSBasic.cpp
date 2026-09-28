@@ -19,6 +19,9 @@
 
 #include "OBSBasic.hpp"
 #include "ui-config.h"
+#ifdef WEBVIEW2_AVAILABLE
+#include <webview2/OBSWebView2.hpp>
+#endif
 
 #include "ColorSelect.hpp"
 #include "OBSBasicControls.hpp"
@@ -1251,6 +1254,9 @@ void OBSBasic::OBSInit()
 
 void OBSBasic::OnFirstLoad()
 {
+#ifdef WEBVIEW2_AVAILABLE
+	InstallWebView2Frontend(this);
+#endif
 	OnEvent(OBS_FRONTEND_EVENT_FINISHED_LOADING);
 
 #ifdef WHATSNEW_ENABLED
@@ -1277,6 +1283,9 @@ OBSBasic::~OBSBasic() {}
 
 void OBSBasic::applicationShutdown() noexcept
 {
+#ifdef WEBVIEW2_AVAILABLE
+	ShutdownWebView2Frontend(this);
+#endif
 	/* clear out UI event queue */
 	QApplication::sendPostedEvents(nullptr);
 #ifndef __APPLE__
