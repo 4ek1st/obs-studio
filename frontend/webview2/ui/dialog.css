@@ -1,0 +1,64 @@
+:root { color-scheme:dark; --qt-window:#20232b; --qt-windowText:#e7e9ed; --qt-base:#171a21; --qt-text:#e7e9ed; --qt-button:#353b49; --qt-buttonText:#e7e9ed; --qt-mid:#3d424f; --qt-highlight:#3c5277; --qt-highlightedText:#fff; --qt-font-family:"Segoe UI"; --qt-font-size:12px; font:var(--qt-font-size) var(--qt-font-family),sans-serif; color:var(--qt-windowText); background:var(--qt-window); --edge:var(--qt-mid); --accent:var(--qt-highlight); }
+* { box-sizing:border-box; }
+body { margin:0; overflow:hidden; }
+#dialog { position:absolute; left:0; top:0; transform-origin:0 0; overflow:hidden; }
+button,input,select,textarea { font:inherit; color:inherit; }
+button,input,select,textarea { outline:none; }
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+button { border:1px solid var(--edge); border-radius:4px; background:var(--qt-button); color:var(--qt-buttonText); padding:2px 9px; cursor:default; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+button:hover { background:color-mix(in srgb,var(--qt-button) 80%,var(--qt-highlight)); }
+button:active,button.checked { background:var(--qt-highlight); color:var(--qt-highlightedText); }
+button.default { border-color:var(--accent); }
+button:disabled,input:disabled,textarea:disabled,select:disabled { opacity:.46; }
+.control { position:absolute; margin:0; min-width:0; min-height:0; overflow:hidden; }
+.control[data-type="native"] { pointer-events:none; }
+.control[data-type="scrollArea"] { pointer-events:none; }
+.control.button { display:flex; gap:6px; align-items:center; justify-content:center; }
+.button .menu-arrow { align-self:stretch; display:flex; align-items:center; padding:0 3px 0 6px; margin-left:auto; border-left:1px solid #66708266; }
+.control img { width:18px; height:18px; object-fit:contain; flex:none; }
+.label { display:flex; align-items:center; white-space:pre; user-select:text; line-height:1.35; }
+.label.wrap { white-space:pre-wrap; }
+.label.center { justify-content:center; text-align:center; }
+.label.right { justify-content:flex-end; text-align:right; }
+.input-shell { display:flex; align-items:center; gap:4px; border:1px solid var(--edge); border-radius:4px; background:var(--qt-base); color:var(--qt-text); }
+.input-shell input { width:100%; min-width:0; height:100%; padding:2px 7px; border:0; background:transparent; }
+.input-shell .affix { padding:0 4px; white-space:nowrap; color:var(--qt-text); }
+input.text,textarea,select { border:1px solid var(--edge); border-radius:4px; background:var(--qt-base); color:var(--qt-text); padding:3px 7px; }
+textarea { resize:none; white-space:pre-wrap; }
+select { padding-right:20px; }
+.choice { display:flex; align-items:center; gap:6px; cursor:default; }
+.choice input { margin:0 1px; accent-color:var(--accent); flex:none; }
+.choice span { overflow:hidden; text-overflow:ellipsis; }
+.choice.disabled { opacity:.46; }
+.group { border:1px solid var(--edge); border-radius:5px; padding:0; pointer-events:none; overflow:visible; }
+.group legend { padding:0 5px; margin-left:6px; background:var(--qt-window); }
+.group legend button { pointer-events:auto; padding:0 2px; border:0; background:transparent; }
+.tabs { overflow:hidden; }
+.tabs button { position:absolute; border-radius:4px 4px 0 0; }
+.tabs button.current { background:var(--qt-highlight); color:var(--qt-highlightedText); border-bottom:2px solid var(--accent); }
+.range { padding:0; accent-color:var(--accent); }
+.range.vertical { writing-mode:vertical-lr; direction:rtl; }
+.range.scroll { opacity:.65; }
+.items { border:1px solid var(--edge); border-radius:4px; background:var(--qt-base); color:var(--qt-text); }
+.item-viewport { position:absolute; overflow:hidden; }
+.item-row { position:absolute; display:flex; align-items:center; gap:5px; padding:0 5px; border:0; border-radius:0; background:transparent; text-align:left; white-space:nowrap; overflow:hidden; cursor:default; }
+.item-row.selected { background:var(--qt-highlight); color:var(--qt-highlightedText); }
+.item-row.current { box-shadow:inset 0 0 0 1px var(--accent); }
+.item-row[aria-disabled="true"] { opacity:.5; }
+.item-row .item-label { overflow:hidden; text-overflow:ellipsis; flex:1; }
+.item-row .expand { border:0; background:transparent; color:inherit; padding:0; width:14px; height:20px; flex:none; }
+.item-row input[type="checkbox"] { flex:none; margin:0; accent-color:var(--accent); }
+.item-header { position:absolute; overflow:hidden; background:var(--qt-button); color:var(--qt-buttonText); }
+.item-header button { position:absolute; height:100%; border:0; border-right:1px solid var(--edge); border-radius:0; text-align:left; }
+.item-scroll { position:absolute; margin:0; padding:0; accent-color:var(--accent); }
+.item-scroll.vertical { writing-mode:vertical-lr; direction:ltr; }
+.progress { display:flex; align-items:center; justify-content:center; border:1px solid var(--edge); border-radius:4px; background:var(--qt-base); color:var(--qt-text); }
+.progress i { position:absolute; inset:0 auto 0 0; background:var(--qt-highlight); }
+.progress span { z-index:1; }
+#error { position:fixed; left:12px; right:12px; bottom:10px; padding:9px 13px; border:1px solid #b65f67; border-radius:5px; color:#ffe6e6; background:#5b2d34; z-index:100001; }
+/* OBS themes may leave Button/Base/Mid palette roles identical to Window because
+   their Qt stylesheet supplies the contrast. Keep editable HTML fields visible. */
+:root { --edge:color-mix(in srgb,var(--qt-window) 76%,var(--qt-windowText) 24%); }
+button:not(.item-row):not(.expand) { background:color-mix(in srgb,var(--qt-button) 88%,var(--qt-buttonText) 12%); }
+button:hover:not(:disabled) { background:color-mix(in srgb,var(--qt-button) 70%,var(--qt-highlight) 30%); }
+.input-shell,input.text,textarea,select { background:color-mix(in srgb,var(--qt-base) 96%,var(--qt-text) 4%); }

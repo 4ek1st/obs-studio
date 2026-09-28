@@ -191,19 +191,19 @@ void OBSBasic::RecordingStop(int code, QString last_error)
 
 	blog(LOG_INFO, RECORDING_STOP);
 
-	if (code == OBS_OUTPUT_UNSUPPORTED && isVisible()) {
-		OBSMessageBox::critical(this, QTStr("Output.RecordFail.Title"), QTStr("Output.RecordFail.Unsupported"));
+	if (code == OBS_OUTPUT_UNSUPPORTED && IsFrontendVisible()) {
+		OBSMessageBox::critical(FrontendWindow(), QTStr("Output.RecordFail.Title"), QTStr("Output.RecordFail.Unsupported"));
 
-	} else if (code == OBS_OUTPUT_ENCODE_ERROR && isVisible()) {
+	} else if (code == OBS_OUTPUT_ENCODE_ERROR && IsFrontendVisible()) {
 		QString msg = last_error.isEmpty()
 				      ? QTStr("Output.RecordError.EncodeErrorMsg")
 				      : QTStr("Output.RecordError.EncodeErrorMsg.LastError").arg(last_error);
-		OBSMessageBox::warning(this, QTStr("Output.RecordError.Title"), msg);
+		OBSMessageBox::warning(FrontendWindow(), QTStr("Output.RecordError.Title"), msg);
 
-	} else if (code == OBS_OUTPUT_NO_SPACE && isVisible()) {
-		OBSMessageBox::warning(this, QTStr("Output.RecordNoSpace.Title"), QTStr("Output.RecordNoSpace.Msg"));
+	} else if (code == OBS_OUTPUT_NO_SPACE && IsFrontendVisible()) {
+		OBSMessageBox::warning(FrontendWindow(), QTStr("Output.RecordNoSpace.Title"), QTStr("Output.RecordNoSpace.Msg"));
 
-	} else if (code != OBS_OUTPUT_SUCCESS && isVisible()) {
+	} else if (code != OBS_OUTPUT_SUCCESS && IsFrontendVisible()) {
 
 		const char *errorDescription;
 		DStr errorMessage;
@@ -217,15 +217,15 @@ void OBSBasic::RecordingStop(int code, QString last_error)
 			dstr_copy(errorMessage, errorDescription);
 		}
 
-		OBSMessageBox::critical(this, QTStr("Output.RecordError.Title"), QT_UTF8(errorMessage));
+		OBSMessageBox::critical(FrontendWindow(), QTStr("Output.RecordError.Title"), QT_UTF8(errorMessage));
 
-	} else if (code == OBS_OUTPUT_UNSUPPORTED && !isVisible()) {
+	} else if (code == OBS_OUTPUT_UNSUPPORTED && !IsFrontendVisible()) {
 		SysTrayNotify(QTStr("Output.RecordFail.Unsupported"), QSystemTrayIcon::Warning);
 
-	} else if (code == OBS_OUTPUT_NO_SPACE && !isVisible()) {
+	} else if (code == OBS_OUTPUT_NO_SPACE && !IsFrontendVisible()) {
 		SysTrayNotify(QTStr("Output.RecordNoSpace.Msg"), QSystemTrayIcon::Warning);
 
-	} else if (code != OBS_OUTPUT_SUCCESS && !isVisible()) {
+	} else if (code != OBS_OUTPUT_SUCCESS && !IsFrontendVisible()) {
 		SysTrayNotify(QTStr("Output.RecordError.Msg"), QSystemTrayIcon::Warning);
 	} else if (code == OBS_OUTPUT_SUCCESS) {
 		if (outputHandler) {
@@ -259,9 +259,9 @@ void OBSBasic::RecordActionTriggered()
 	if (outputHandler->RecordingActive()) {
 		bool confirm = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStoppingRecord");
 
-		if (confirm && isVisible()) {
+		if (confirm && IsFrontendVisible()) {
 			QMessageBox::StandardButton button = OBSMessageBox::question(
-				this, QTStr("ConfirmStopRecord.Title"), QTStr("ConfirmStopRecord.Text"),
+				FrontendWindow(), QTStr("ConfirmStopRecord.Title"), QTStr("ConfirmStopRecord.Text"),
 				QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 
 			if (button == QMessageBox::No) {
@@ -399,7 +399,7 @@ void OBSBasic::DiskSpaceMessage()
 {
 	blog(LOG_ERROR, "Recording stopped because of low disk space");
 
-	OBSMessageBox::critical(this, QTStr("Output.RecordNoSpace.Title"), QTStr("Output.RecordNoSpace.Msg"));
+	OBSMessageBox::critical(FrontendWindow(), QTStr("Output.RecordNoSpace.Title"), QTStr("Output.RecordNoSpace.Msg"));
 }
 
 bool OBSBasic::LowDiskSpace()

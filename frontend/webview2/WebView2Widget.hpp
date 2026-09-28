@@ -2,18 +2,24 @@
 #include <QJsonObject>
 #include <QWidget>
 #include <memory>
+#include <functional>
+#include "ExternalDrop.hpp"
 
 class WebView2Widget : public QWidget {
 	Q_OBJECT
 public:
-	WebView2Widget(QWidget *parent, QString assetsPath, QString profilePath);
+	WebView2Widget(QWidget *parent, QString assetsPath, QString profilePath,
+		       QString document = QStringLiteral("index.html"));
 	~WebView2Widget() override;
 	void postMessage(const QJsonObject &message);
+	// Native-only diagnostic API; paths are never accepted from web messages.
+	void capturePreview(QString path, std::function<void(bool)> done);
 
 signals:
 	void ready();
 	void messageReceived(QJsonObject message);
 	void failed(QString message);
+	void externalDrop(QString requestId, OBSWeb::ExternalDropData drop);
 
 protected:
 	void resizeEvent(QResizeEvent *event) override;
@@ -27,5 +33,6 @@ private:
 	std::unique_ptr<Impl> impl;
 	void initialize();
 	void updateBounds();
+	void queueBoundsUpdate();
 	void reportFailure(const QString &stage, long result);
 };

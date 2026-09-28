@@ -92,7 +92,7 @@ void OBSBasic::IconActivated(QSystemTrayIcon::ActivationReason reason)
 	UNUSED_PARAMETER(reason);
 #else
 	if (reason == QSystemTrayIcon::Trigger) {
-		EnablePreviewDisplay(previewEnabled && !isVisible());
+		EnablePreviewDisplay(previewEnabled && !IsFrontendVisible());
 		ToggleShowHide();
 	}
 #endif
@@ -135,7 +135,7 @@ void OBSBasic::SystemTray(bool firstStarted)
 		}
 	}
 
-	if (isVisible()) {
+	if (IsFrontendVisible()) {
 		showHide->setText(QTStr("Basic.SystemTray.Hide"));
 	} else {
 		showHide->setText(QTStr("Basic.SystemTray.Show"));

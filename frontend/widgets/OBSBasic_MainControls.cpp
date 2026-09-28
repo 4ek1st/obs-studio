@@ -497,12 +497,13 @@ void OBSBasic::on_actionAlwaysOnTop_triggered()
 
 void OBSBasic::ToggleAlwaysOnTop()
 {
-	bool isAlwaysOnTop = IsAlwaysOnTop(this);
+	QWidget *window = FrontendWindow();
+	bool isAlwaysOnTop = IsAlwaysOnTop(window);
 
 	ui->actionAlwaysOnTop->setChecked(!isAlwaysOnTop);
-	SetAlwaysOnTop(this, !isAlwaysOnTop);
+	SetAlwaysOnTop(window, !isAlwaysOnTop);
 
-	show();
+	window->show();
 }
 
 void OBSBasic::CreateEditTransformWindow(obs_sceneitem_t *item)
@@ -518,10 +519,11 @@ void OBSBasic::CreateEditTransformWindow(obs_sceneitem_t *item)
 
 void OBSBasic::on_actionFullscreenInterface_triggered()
 {
-	if (!isFullScreen()) {
-		showFullScreen();
+	QWidget *window = FrontendWindow();
+	if (!window->isFullScreen()) {
+		window->showFullScreen();
 	} else {
-		showNormal();
+		window->showNormal();
 	}
 }
 
@@ -558,9 +560,12 @@ void OBSBasic::on_toggleStatusBar_toggled(bool visible)
 
 void OBSBasic::SetShowing(bool showing)
 {
-	if (!showing && isVisible()) {
-		config_set_string(App()->GetUserConfig(), "BasicWindow", "geometry",
-				  saveGeometry().toBase64().constData());
+	QWidget *window = FrontendWindow();
+	if (!showing && window->isVisible()) {
+		if (window == this) {
+			config_set_string(App()->GetUserConfig(), "BasicWindow", "geometry",
+					  saveGeometry().toBase64().constData());
+		}
 
 		/* hide all visible child dialogs */
 		visDlgPositions.clear();
@@ -574,7 +579,7 @@ void OBSBasic::SetShowing(bool showing)
 		if (showHide) {
 			showHide->setText(QTStr("Basic.SystemTray.Show"));
 		}
-		QTimer::singleShot(0, this, &OBSBasic::hide);
+		QTimer::singleShot(0, window, &QWidget::hide);
 
 		if (previewEnabled) {
 			EnablePreviewDisplay(false);
@@ -584,11 +589,11 @@ void OBSBasic::SetShowing(bool showing)
 		EnableOSXDockIcon(false);
 #endif
 
-	} else if (showing && !isVisible()) {
+	} else if (showing && !window->isVisible()) {
 		if (showHide) {
 			showHide->setText(QTStr("Basic.SystemTray.Hide"));
 		}
-		QTimer::singleShot(0, this, &OBSBasic::show);
+		QTimer::singleShot(0, window, &QWidget::show);
 
 		if (previewEnabled) {
 			EnablePreviewDisplay(true);
@@ -599,8 +604,8 @@ void OBSBasic::SetShowing(bool showing)
 #endif
 
 		/* raise and activate window to ensure it is on top */
-		raise();
-		activateWindow();
+		window->raise();
+		window->activateWindow();
 
 		/* show all child dialogs that was visible earlier */
 		if (!visDialogs.isEmpty()) {
@@ -615,16 +620,16 @@ void OBSBasic::SetShowing(bool showing)
 		 * bar. */
 		if (sysTrayMinimizeToTray()) {
 			Qt::WindowStates state;
-			state = windowState() & ~Qt::WindowMinimized;
+			state = window->windowState() & ~Qt::WindowMinimized;
 			state |= Qt::WindowActive;
-			setWindowState(state);
+			window->setWindowState(state);
 		}
 	}
 }
 
 void OBSBasic::ToggleShowHide()
 {
-	bool showing = isVisible();
+	bool showing = IsFrontendVisible();
 	if (showing) {
 		/* check for modal dialogs */
 		EnumDialogs();

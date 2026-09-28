@@ -55,6 +55,8 @@ public:
 
 	void UpdateIcons();
 	void SetIconsVisible(bool visible);
+	// Shared drag/reorder path for native and WebView2 source lists.
+	bool MoveSelectedItems(int row, int position);
 
 public slots:
 	inline void ReorderItems() { GetStm()->ReorderItems(); }

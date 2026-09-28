@@ -40,7 +40,8 @@ void OBSBasic::ReplayBufferActionTriggered()
 void OBSBasic::ShowReplayBufferPauseWarning()
 {
 	auto msgBox = []() {
-		QMessageBox msgbox(App()->GetMainWindow());
+		auto *main = OBSBasic::Get();
+		QMessageBox msgbox(main ? main->FrontendWindow() : nullptr);
 		msgbox.setWindowTitle(QTStr("Output.ReplayBuffer."
 					    "PauseWarning.Title"));
 		msgbox.setText(QTStr("Output.ReplayBuffer."
@@ -205,22 +206,22 @@ void OBSBasic::ReplayBufferStop(int code)
 
 	blog(LOG_INFO, REPLAY_BUFFER_STOP);
 
-	if (code == OBS_OUTPUT_UNSUPPORTED && isVisible()) {
-		OBSMessageBox::critical(this, QTStr("Output.RecordFail.Title"), QTStr("Output.RecordFail.Unsupported"));
+	if (code == OBS_OUTPUT_UNSUPPORTED && IsFrontendVisible()) {
+		OBSMessageBox::critical(FrontendWindow(), QTStr("Output.RecordFail.Title"), QTStr("Output.RecordFail.Unsupported"));
 
-	} else if (code == OBS_OUTPUT_NO_SPACE && isVisible()) {
-		OBSMessageBox::warning(this, QTStr("Output.RecordNoSpace.Title"), QTStr("Output.RecordNoSpace.Msg"));
+	} else if (code == OBS_OUTPUT_NO_SPACE && IsFrontendVisible()) {
+		OBSMessageBox::warning(FrontendWindow(), QTStr("Output.RecordNoSpace.Title"), QTStr("Output.RecordNoSpace.Msg"));
 
-	} else if (code != OBS_OUTPUT_SUCCESS && isVisible()) {
-		OBSMessageBox::critical(this, QTStr("Output.RecordError.Title"), QTStr("Output.RecordError.Msg"));
+	} else if (code != OBS_OUTPUT_SUCCESS && IsFrontendVisible()) {
+		OBSMessageBox::critical(FrontendWindow(), QTStr("Output.RecordError.Title"), QTStr("Output.RecordError.Msg"));
 
-	} else if (code == OBS_OUTPUT_UNSUPPORTED && !isVisible()) {
+	} else if (code == OBS_OUTPUT_UNSUPPORTED && !IsFrontendVisible()) {
 		SysTrayNotify(QTStr("Output.RecordFail.Unsupported"), QSystemTrayIcon::Warning);
 
-	} else if (code == OBS_OUTPUT_NO_SPACE && !isVisible()) {
+	} else if (code == OBS_OUTPUT_NO_SPACE && !IsFrontendVisible()) {
 		SysTrayNotify(QTStr("Output.RecordNoSpace.Msg"), QSystemTrayIcon::Warning);
 
-	} else if (code != OBS_OUTPUT_SUCCESS && !isVisible()) {
+	} else if (code != OBS_OUTPUT_SUCCESS && !IsFrontendVisible()) {
 		SysTrayNotify(QTStr("Output.RecordError.Msg"), QSystemTrayIcon::Warning);
 	}
 

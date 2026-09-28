@@ -1,22 +1,34 @@
 #include "OBSWebView2.hpp"
 #include "WebView2Widget.hpp"
 #include "UiGeometry.hpp"
+#include "AudioMixerBridge.hpp"
+#include "QtDialogBridge.hpp"
 #include <QCloseEvent>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
 #include <widgets/OBSQTDisplay.hpp>
+#include <widgets/OBSBasicPreview.hpp>
+#include <widgets/AudioMixer.hpp>
+#include <components/VolumeControl.hpp>
 #include <components/SourceTree.hpp>
 #include <QFile>
+#include <QBuffer>
 #include <memory>
 #include <utility/platform.hpp>
 #include <obs-frontend-api.h>
 #include <obs.hpp>
+#include <qt-wrappers.hpp>
 #include <graphics/graphics.h>
 
 #include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
+#include <QGridLayout>
+#include <QPushButton>
+#include <QKeyEvent>
 #include <QDir>
 #include <QCryptographicHash>
 #include <QMessageBox>
@@ -29,11 +41,74 @@
 #include <QPointer>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QToolBar>
+#include <QCheckBox>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QComboBox>
+#include <QSpinBox>
+#include <QSlider>
+#include <QDockWidget>
+#include <QStatusBar>
+#include <QContextMenuEvent>
+#include <QCursor>
+#include <QApplication>
 #include <algorithm>
 #include <cmath>
 #include <mutex>
 
+#ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
+#include "../../test/webview2/audio-integration.inl"
+#include "../../test/webview2/dialog-integration.inl"
+#include "../../test/webview2/output-integration.inl"
+#endif
+
 namespace {
+struct NativePlacement {
+	QPointer<QWidget> parent;
+	QPointer<QLayout> layout;
+	int index = -1, row = 0, column = 0, rows = 1, columns = 1;
+	Qt::Alignment alignment{};
+	bool visible = false;
+	static QLayout *owner(QLayout *layout, QWidget *widget)
+	{
+		if (!layout) return nullptr;
+		if (layout->indexOf(widget) >= 0) return layout;
+		for (int i = 0; i < layout->count(); ++i)
+			if (auto *found = owner(layout->itemAt(i)->layout(), widget)) return found;
+		return nullptr;
+	}
+	void take(QWidget *widget, QWidget *destination)
+	{
+		parent = widget->parentWidget();
+		visible = !widget->isHidden();
+		layout = parent ? owner(parent->layout(), widget) : nullptr;
+		if (layout) {
+			index = layout->indexOf(widget);
+			alignment = layout->itemAt(index)->alignment();
+			if (auto *grid = qobject_cast<QGridLayout *>(layout.data()))
+				grid->getItemPosition(index, &row, &column, &rows, &columns);
+			layout->removeWidget(widget);
+		}
+		widget->setParent(destination);
+		widget->hide();
+	}
+	void restore(QWidget *widget)
+	{
+		if (!widget || !parent) return;
+		widget->hide();
+		widget->setParent(parent);
+		if (auto *grid = qobject_cast<QGridLayout *>(layout.data()))
+			grid->addWidget(widget, row, column, rows, columns, alignment);
+		else if (auto *box = qobject_cast<QBoxLayout *>(layout.data()))
+			box->insertWidget(index, widget, 0, alignment);
+		else if (layout) layout->addWidget(widget);
+		widget->setVisible(visible);
+		parent = nullptr;
+		layout = nullptr;
+	}
+};
+
 QString SourceId(obs_source_t *source)
 {
 	return source ? QString::fromUtf8(obs_source_get_uuid(source)) : QString();
@@ -50,6 +125,18 @@ class OBSWebView2 final : public QWidget {
 	QMainWindow *main;
 	WebView2Widget *browser;
 	OBSQTDisplay *preview;
+	QPointer<OBSQTDisplay> programPreview;
+	NativePlacement previewPlacement, programPlacement;
+	bool surfacesBorrowed = false;
+	bool nativeEditor = false;
+	std::unique_ptr<OBSWeb::AudioMixerBridge> audio;
+	QTimer *meterTimer = nullptr;
+	QHash<QString, QPointer<QAbstractButton>> liveButtons;
+	QHash<QAbstractButton *, QString> buttonIds;
+	quint64 nextButton = 0;
+	QSet<QDockWidget *> routedDocks;
+	QHash<qint64, QString> sourceIcons;
+	QString toolbarSource;
 	QLabel *errorLabel;
 	QTimer *timer;
 	QHash<QString, QPointer<QAction>> actions;
@@ -58,6 +145,7 @@ class OBSWebView2 final : public QWidget {
 	bool reportedPreviewGeometry = false;
 	bool ownsApplicationSession = QCoreApplication::arguments().contains(QStringLiteral("--webview2"));
 	QByteArray lastState;
+	bool failedFrontend = false;
 #ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
 	QJsonObject lastTestReply;
 #endif
@@ -71,6 +159,9 @@ class OBSWebView2 final : public QWidget {
 		const QString id = QStringLiteral("a%1").arg(++nextAction);
 		actions.insert(id, action);
 		actionIds.insert(action, id);
+		// Preserve list-specific shortcut scope (for example the two Delete actions).
+		if (action->shortcutContext() == Qt::WindowShortcut || action->shortcutContext() == Qt::ApplicationShortcut)
+			addAction(action);
 		connect(action, &QObject::destroyed, this, [this, action, id] {
 			actions.remove(id);
 			actionIds.remove(action);
@@ -87,8 +178,11 @@ class OBSWebView2 final : public QWidget {
 			if (!action->isVisible() || action->property("webview2Entry").toBool())
 				continue;
 			QJsonObject entry{{"id", registerAction(action)}, {"text", action->text()},
+					  {"name", action->objectName().isEmpty() && action->menu() ? action->menu()->objectName() : action->objectName()},
 					  {"enabled", action->isEnabled()}, {"separator", action->isSeparator()},
 					  {"checkable", action->isCheckable()}, {"checked", action->isChecked()},
+					  {"shortcutKey", action->shortcut().toString(QKeySequence::PortableText)},
+					  {"shortcutGlobal", action->shortcutContext() == Qt::WindowShortcut || action->shortcutContext() == Qt::ApplicationShortcut},
 					  {"shortcut", action->shortcut().toString(QKeySequence::NativeText)}};
 			if (action->menu())
 				entry.insert("children", menuState(action->menu()->actions(), depth + 1));
@@ -96,6 +190,8 @@ class OBSWebView2 final : public QWidget {
 		}
 		return result;
 	}
+
+#include "WorkspaceControls.inl"
 
 	static void collectSelection(obs_scene_t *scene, QJsonArray &selection)
 	{
@@ -129,22 +225,7 @@ class OBSWebView2 final : public QWidget {
 						     {"name", QString::fromUtf8(obs_source_get_name(source))}});
 		}
 		obs_frontend_source_list_free(&scenes);
-		QJsonArray sourceList;
-		if (scene) {
-			obs_scene_enum_items(
-				obs_scene_from_source(scene),
-				[](obs_scene_t *, obs_sceneitem_t *item, void *data) {
-					auto *source = obs_sceneitem_get_source(item);
-					static_cast<QJsonArray *>(data)->append(
-						QJsonObject{{"id", QString::number(obs_sceneitem_get_id(item))},
-							    {"uuid", SourceId(source)},
-							    {"name", QString::fromUtf8(obs_source_get_name(source))},
-							    {"visible", obs_sceneitem_visible(item)},
-							    {"locked", obs_sceneitem_locked(item)},
-							    {"selected", obs_sceneitem_selected(item)}});
-					return true;
-				}, &sourceList);
-		}
+		const QJsonArray sourceList = sourceRows(scene);
 		QJsonArray controls;
 		for (const auto &name : controlNames) {
 			if (auto *button = main->findChild<QAbstractButton *>(name)) {
@@ -155,8 +236,8 @@ class OBSWebView2 final : public QWidget {
 			}
 		}
 		QJsonObject labels;
-		for (const auto *key : {"Basic.Main.Scenes", "Basic.Main.Sources", "Basic.Main.Mixer",
-					"Basic.Main.Controls", "Basic.Main.Transition", "Basic.MainMenu.File",
+		for (const auto *key : {"Basic.Main.Scenes", "Basic.Main.Sources", "Mixer",
+					"Basic.Main.Controls", "Basic.SceneTransitions", "Basic.MainMenu.File",
 					"Basic.MainMenu.Edit", "Basic.MainMenu.View", "Basic.MainMenu.Profile"}) {
 			labels.insert(QString::fromLatin1(key), QTStr(key));
 		}
@@ -167,6 +248,14 @@ class OBSWebView2 final : public QWidget {
 				   {"streaming", obs_frontend_streaming_active()},
 				   {"paused", obs_frontend_recording_paused()},
 				   {"fps", std::round(obs_get_active_fps() * 100.0) / 100.0}};
+		const auto palette = main->palette();
+		state.insert("appearance", QJsonObject{{"background", palette.color(QPalette::Window).name()},
+			{"panel", palette.color(QPalette::Base).name()}, {"raised", palette.color(QPalette::Button).name()},
+			{"text", palette.color(QPalette::WindowText).name()}, {"muted", palette.color(QPalette::Disabled, QPalette::Text).name()},
+			{"selected", palette.color(QPalette::Highlight).name()}, {"selectedText", palette.color(QPalette::HighlightedText).name()},
+			{"light", palette.color(QPalette::Window).lightness() > 150}});
+		setWindowTitle(main->windowTitle() + QStringLiteral(" — WebView2"));
+		addWorkspaceState(state);
 		BPtr<char> profile = obs_frontend_get_current_profile();
 		BPtr<char> collection = obs_frontend_get_current_scene_collection();
 		QJsonObject context{{"profile", QString::fromUtf8(profile.Get())},
@@ -222,6 +311,9 @@ class OBSWebView2 final : public QWidget {
 
 	void execute(const QJsonObject &message)
 	{
+		const QPointer<OBSWebView2> guard(this);
+		if (executeWorkspace(message))
+			return;
 		const auto id = message.value("id").toString();
 		const auto command = message.value("command").toString();
 		const auto args = message.value("args").toObject();
@@ -246,8 +338,8 @@ class OBSWebView2 final : public QWidget {
 				obs_frontend_set_current_preview_scene(source);
 			else
 				obs_frontend_set_current_scene(source);
+			publishState(true);
 			reply(id, QJsonObject{{"scene", SourceId(source)}});
-			publishState();
 		} else if (command == QStringLiteral("source.select")) {
 			OBSSourceAutoRelease current = obs_frontend_preview_program_mode_active()
 							      ? obs_frontend_get_current_preview_scene()
@@ -257,19 +349,22 @@ class OBSWebView2 final : public QWidget {
 				reject(id, QStringLiteral("StaleContext"), QStringLiteral("The scene has changed. Select the source again."));
 				return;
 			}
-			for (int row = 0; row < tree->model()->rowCount(); ++row) {
-				const OBSSceneItem item = tree->Get(row);
-				if (obs_sceneitem_get_scene(item) != obs_scene_from_source(current) ||
-				    QString::number(obs_sceneitem_get_id(item)) != args.value("id").toString() ||
-				    SourceId(obs_sceneitem_get_source(item)) != args.value("uuid").toString())
-					continue;
-				const auto index = tree->model()->index(row, 0);
-				tree->selectionModel()->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect);
-				reply(id, QJsonObject{});
-				publishState();
-				return;
-			}
-			reject(id, QStringLiteral("Unavailable"), QStringLiteral("The source item no longer exists."));
+            const int row = sourceRow(args);
+            if (row < 0) {
+                reject(id, QStringLiteral("Unavailable"), QStringLiteral("The source item no longer exists."));
+                return;
+            }
+            const auto index = tree->model()->index(row, 0);
+            const auto currentIndex = tree->selectionModel()->currentIndex();
+            if (args.value("range").toBool() && currentIndex.isValid()) {
+                tree->selectionModel()->select(QItemSelection(currentIndex, index), QItemSelectionModel::ClearAndSelect);
+                tree->selectionModel()->setCurrentIndex(index, QItemSelectionModel::NoUpdate);
+            } else {
+                tree->selectionModel()->setCurrentIndex(index, args.value("additive").toBool()
+                    ? QItemSelectionModel::Toggle : QItemSelectionModel::ClearAndSelect);
+            }
+            publishState(true);
+            reply(id, QJsonObject{});
 		} else if (command == QStringLiteral("menu.prepare")) {
 			const QPointer<QAction> action = actions.value(args.value("id").toString());
 			if (!action || !action->menu() || !action->isEnabled() || !action->isVisible()) {
@@ -278,6 +373,7 @@ class OBSWebView2 final : public QWidget {
 			}
 			QPointer<QMenu> menu = action->menu();
 			QMetaObject::invokeMethod(menu, "aboutToShow", Qt::DirectConnection);
+			if (!guard) return;
 			if (menu)
 				reply(id, menuState(menu->actions()));
 			else
@@ -294,18 +390,26 @@ class OBSWebView2 final : public QWidget {
 			// WebView2Widget already queued this message outside the COM callback.
 			// Execute before another scene/profile event can change the target.
 			action->trigger();
+			if (!guard) return;
+			if (action && (action->objectName() == "resetUI" || action->objectName() == "resetDocks"))
+				browser->postMessage(QJsonObject{{"version", 1}, {"event", "workspace.reset"}, {"data", QJsonObject{}}});
+			publishState(true);
 		} else if (command == QStringLiteral("control.click")) {
 			if (!validateContext(id, args))
 				return;
 			const auto name = args.value("id").toString();
 			const QPointer<QAbstractButton> button =
-				controlNames.contains(name) ? main->findChild<QAbstractButton *>(name) : nullptr;
+				liveButtons.contains(name) ? liveButtons.value(name).data() : (controlNames.contains(name) ? main->findChild<QAbstractButton *>(name) : nullptr);
 			if (!button || !button->isEnabled() || !button->isVisibleTo(main)) {
 				reject(id, QStringLiteral("Unavailable"), QStringLiteral("The control is no longer available."));
 				return;
 			}
 			reply(id, QJsonObject{{"accepted", true}});
-			button->click();
+			if (button->inherits("MenuButton")) {
+				QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+				QApplication::sendEvent(button, &enter);
+			} else button->click();
+			if (guard) publishState(true);
 		} else if (command == QStringLiteral("source.properties") || command == QStringLiteral("source.filters")) {
 			OBSSourceAutoRelease source =
 				obs_get_source_by_uuid(args.value("uuid").toString().toUtf8().constData());
@@ -319,22 +423,37 @@ class OBSWebView2 final : public QWidget {
 			else
 				obs_frontend_open_source_filters(source);
 		} else if (command == QStringLiteral("preview.bounds")) {
-			const auto bounds = OBSWeb::PreviewRect(args, browser->geometry());
-			if (!bounds) {
-				reject(id, QStringLiteral("InvalidArgs"), QStringLiteral("Invalid preview bounds or viewport."));
-				return;
-			}
-			preview->setGeometry(*bounds);
-			preview->setVisible(args.value("visible").toBool(true) && !bounds->isEmpty());
-			preview->raise();
-			if (!reportedPreviewGeometry) {
-				reportedPreviewGeometry = true;
-				blog(LOG_INFO, "[WebView2] Preview viewport %.1fx%.1f CSS, host %dx%d Qt, rect %d,%d %dx%d",
-				     args.value("viewportWidth").toDouble(), args.value("viewportHeight").toDouble(),
-				     browser->width(), browser->height(), bounds->x(), bounds->y(), bounds->width(), bounds->height());
-			}
-			reply(id, QJsonObject{});
+            if (!surfacesBorrowed) { reply(id, QJsonObject{}); return; }
+            const QString target = args.value("target").toString(QStringLiteral("preview"));
+            if (target != "preview" && target != "program") {
+                reject(id, "InvalidArgs", "Unknown preview surface.");
+                return;
+            }
+            const auto bounds = OBSWeb::PreviewRect(args, browser->geometry());
+            if (!bounds) {
+                reject(id, QStringLiteral("InvalidArgs"), QStringLiteral("Invalid preview bounds or viewport."));
+                return;
+            }
+            syncProgramSurface();
+            OBSQTDisplay *surface = target == "program" ? programPreview.data() : preview;
+            if (surface) {
+                surface->setGeometry(*bounds);
+                surface->setVisible(args.value("visible").toBool(true) && !bounds->isEmpty());
+                surface->raise();
+            }
+            if (target == "preview" && !reportedPreviewGeometry) {
+                reportedPreviewGeometry = true;
+                blog(LOG_INFO, "[WebView2] Native editor viewport %.1fx%.1f CSS, host %dx%d Qt, rect %d,%d %dx%d",
+                     args.value("viewportWidth").toDouble(), args.value("viewportHeight").toDouble(),
+                     browser->width(), browser->height(), bounds->x(), bounds->y(), bounds->width(), bounds->height());
+            }
+            reply(id, QJsonObject{});
 		} else if (command == QStringLiteral("window.original")) {
+			timer->stop();
+			meterTimer->stop();
+			restoreSurfaces();
+			setProperty("webview2OwnsSession", false);
+			hide();
 			main->showNormal();
 			main->raise();
 			main->activateWindow();
@@ -371,13 +490,31 @@ class OBSWebView2 final : public QWidget {
 	}
 
 #ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
+#include "../../test/webview2/persistence-integration.inl"
+#include "../../test/webview2/workspace-integration.inl"
 #include "../../test/webview2/obs-integration.inl"
 #endif
 
 protected:
+	void dragEnterEvent(QDragEnterEvent *event) override { QApplication::sendEvent(main, event); }
+	void dropEvent(QDropEvent *event) override { QApplication::sendEvent(main, event); }
+	void changeEvent(QEvent *event) override
+	{
+		QWidget::changeEvent(event);
+		if (event->type() != QEvent::WindowStateChange || !property("webview2OwnsSession").toBool()) return;
+		auto *config = App()->GetUserConfig();
+		if (isMinimized() && config_get_bool(config, "BasicWindow", "SysTrayEnabled") &&
+		    config_get_bool(config, "BasicWindow", "SysTrayMinimizeToTray")) {
+			QMetaObject::invokeMethod(main, "ToggleShowHide", Qt::QueuedConnection);
+		} else {
+			QMetaObject::invokeMethod(main, "EnablePreviewDisplay", Qt::DirectConnection,
+			                         Q_ARG(bool, !isMinimized() && obs_frontend_preview_enabled()));
+		}
+	}
 	void closeEvent(QCloseEvent *event) override
 	{
-		if (!ownsApplicationSession) {
+		config_set_string(App()->GetUserConfig(), "WebView2", "Geometry", saveGeometry().toBase64().constData());
+		if (!property("webview2OwnsSession").toBool()) {
 			QWidget::closeEvent(event);
 			return;
 		}
@@ -388,14 +525,45 @@ protected:
 	}
 
 public:
+	bool hasFailed() const { return failedFrontend; }
+	void restoreSurfaces()
+	{
+		if (!surfacesBorrowed) return;
+		programPlacement.restore(programPreview);
+		if (nativeEditor) previewPlacement.restore(preview);
+		surfacesBorrowed = false;
+	}
+	void resumeFrontend()
+	{
+		if (!surfacesBorrowed) {
+			if (nativeEditor) previewPlacement.take(preview, this);
+			surfacesBorrowed = true;
+			programPreview = nullptr;
+			syncProgramSurface();
+		}
+		setProperty("webview2OwnsSession", ownsApplicationSession);
+		showNormal();
+		if (ownsApplicationSession) main->hide();
+		browser->postMessage(QJsonObject{{"version", 1}, {"event", "viewport.invalidate"}, {"data", QJsonObject{}}});
+		publishState(true);
+		timer->start();
+		meterTimer->start();
+		raise();
+		activateWindow();
+	}
 	explicit OBSWebView2(QMainWindow *parent, const QString &assets, const QString &profile)
 		: QWidget(parent, Qt::Window), main(parent)
 	{
 		setObjectName(QStringLiteral("obsWebView2Window"));
+		setAcceptDrops(true);
+		setProperty("webview2OwnsSession", ownsApplicationSession);
 		setWindowTitle(QStringLiteral("OBS — WebView2"));
 		setAttribute(Qt::WA_DeleteOnClose);
 		resize(1280, 840);
 		setMinimumSize(850, 600);
+		const char *savedGeometry = config_get_string(App()->GetUserConfig(), "WebView2", "Geometry");
+		if (savedGeometry && *savedGeometry) restoreGeometry(QByteArray::fromBase64(savedGeometry));
+		SetAlwaysOnTop(this, config_get_bool(App()->GetUserConfig(), "BasicWindow", "AlwaysOnTop"));
 		auto *layout = new QVBoxLayout(this);
 		layout->setContentsMargins(0, 0, 0, 0);
 		errorLabel = new QLabel(this);
@@ -404,47 +572,88 @@ public:
 		layout->addWidget(errorLabel);
 		browser = new WebView2Widget(this, assets, profile);
 		layout->addWidget(browser);
-		preview = new OBSQTDisplay(this);
-		preview->SetDisplayBackgroundColor(QColor(16, 16, 19));
-		preview->hide();
-		connect(preview, &OBSQTDisplay::DisplayCreated, this, [this] {
-			obs_display_add_draw_callback(preview->GetDisplay(), drawPreview, this);
-		});
+        preview = main->findChild<OBSBasicPreview *>(QStringLiteral("preview"));
+        nativeEditor = preview != nullptr;
+        if (nativeEditor) {
+            previewPlacement.take(preview, this);
+            surfacesBorrowed = true;
+        } else {
+            preview = new OBSQTDisplay(this);
+            connect(preview, &OBSQTDisplay::DisplayCreated, this, [this] {
+                obs_display_add_draw_callback(preview->GetDisplay(), drawPreview, this);
+            });
+        }
+        surfacesBorrowed = true;
+        preview->hide();
+        audio = std::make_unique<OBSWeb::AudioMixerBridge>(main);
+        meterTimer = new QTimer(this);
+        meterTimer->setInterval(50);
+        connect(meterTimer, &QTimer::timeout, this, [this] {
+            browser->postMessage(QJsonObject{{"version", 1}, {"event", "audio.levels"}, {"data", audio->levels()}});
+        });
+        InstallWebView2Dialogs(main, assets, profile);
 		timer = new QTimer(this);
 		timer->setInterval(500);
 		connect(timer, &QTimer::timeout, this, [this] { publishState(); });
 		connect(browser, &WebView2Widget::ready, this, [this] {
 			blog(LOG_INFO, "[WebView2] Local interface ready");
+			meterTimer->start();
+			if (ownsApplicationSession) {
+				QList<QPointer<QDockWidget>> visibleDocks;
+				for (auto *dock : main->findChildren<QDockWidget *>())
+					if (!isWebDock(dock) && !dock->isHidden()) visibleDocks.append(dock);
+				main->hide();
+				for (auto dock : visibleDocks) if (dock) showNativeDock(dock);
+			}
 			publishState(true);
 			timer->start();
 #ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
 			const auto arguments = QCoreApplication::arguments();
 			if (arguments.contains(QStringLiteral("--webview2-self-test")) &&
 			    arguments.contains(QStringLiteral("--portable")) &&
-			    arguments.contains(QStringLiteral("--only-bundled-plugins")))
-				runIntegrationChecks();
+			    arguments.contains(QStringLiteral("--only-bundled-plugins"))) {
+				if (arguments.contains(QStringLiteral("--webview2-persistence-test"))) runPersistenceChecks();
+				else runIntegrationChecks();
+			}
 #endif
 		});
 		connect(browser, &WebView2Widget::messageReceived, this,
 			[this](const QJsonObject &message) { execute(message); });
+		connect(browser, &WebView2Widget::externalDrop, this, [this](const QString &id, const OBSWeb::ExternalDropData &drop) {
+			const QPointer<OBSWebView2> guard(this);
+			reply(id, QJsonObject{{"accepted", true}});
+			OBSWeb::DispatchExternalDrop(main, drop);
+			if (guard) publishState(true);
+		});
 		connect(browser, &WebView2Widget::failed, this, [this](const QString &error) {
+			if (failedFrontend) return;
+			failedFrontend = true;
 			timer->stop();
-			preview->hide();
-			errorLabel->setText(error + QStringLiteral("\nClose this window and reopen WebView2 from OBS Tools."));
-			errorLabel->show();
+			meterTimer->stop();
+			restoreSurfaces();
+			setProperty("webview2OwnsSession", false);
+			hide();
+			main->show();
+			main->raise();
 			blog(LOG_ERROR, "[WebView2] %s", error.toUtf8().constData());
+			QMessageBox::warning(main, QStringLiteral("WebView2"),
+				error + QStringLiteral("\nWebView2 is unavailable. OBS remains open. You can retry from Tools → WebView2."));
 		});
 	}
 
-	~OBSWebView2() override
-	{
-		timer->stop();
-		// The draw callback must stop before the source reference and mutex die.
-		if (preview->GetDisplay())
-			obs_display_remove_draw_callback(preview->GetDisplay(), drawPreview, this);
-		delete preview;
-		delete browser;
-	}
+    ~OBSWebView2() override
+    {
+        timer->stop();
+        meterTimer->stop();
+        audio.reset();
+        restoreSurfaces();
+        if (!nativeEditor) {
+            if (preview->GetDisplay())
+                obs_display_remove_draw_callback(preview->GetDisplay(), drawPreview, this);
+            delete preview;
+        }
+        delete browser;
+    }
 };
 } // namespace
 
@@ -464,10 +673,9 @@ void InstallWebView2Frontend(OBSBasic *window)
 	action->setProperty("webview2Entry", true);
 	QObject::connect(action, &QAction::triggered, window, [window] {
 		if (auto *existing = window->findChild<QWidget *>(QStringLiteral("obsWebView2Window"), Qt::FindDirectChildrenOnly)) {
-			existing->showNormal();
-			existing->raise();
-			existing->activateWindow();
-			return;
+			auto *frontend = static_cast<OBSWebView2 *>(existing);
+			if (!frontend->hasFailed()) { frontend->resumeFrontend(); return; }
+			delete frontend;
 		}
 		std::string assets;
 		if (!GetDataFilePath("webview2", assets)) {

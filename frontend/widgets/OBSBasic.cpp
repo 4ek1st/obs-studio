@@ -1067,7 +1067,7 @@ void OBSBasic::OBSInit()
 #endif
 
 	if (!isWayland && (alwaysOnTop || opt_always_on_top)) {
-		SetAlwaysOnTop(this, true);
+		SetAlwaysOnTop(FrontendWindow(), true);
 		ui->actionAlwaysOnTop->setChecked(true);
 	} else if (isWayland) {
 		if (opt_always_on_top) {
@@ -1246,7 +1246,7 @@ void OBSBasic::OBSInit()
 	OnFirstLoad();
 
 	if (!hideWindowOnStart) {
-		activateWindow();
+		FrontendWindow()->activateWindow();
 	}
 
 	App()->handlePluginLoadState();
@@ -1823,7 +1823,7 @@ bool OBSBasic::promptToClose()
 
 	SetShowing(true);
 	QMessageBox::StandardButton button =
-		OBSMessageBox::question(this, QTStr("ConfirmExit.Title"), QTStr("ConfirmExit.Text"),
+		OBSMessageBox::question(FrontendWindow(), QTStr("ConfirmExit.Title"), QTStr("ConfirmExit.Text"),
 					QMessageBox::StandardButtons(QMessageBox::Ok | QMessageBox::Cancel));
 
 	if (button == QMessageBox::Cancel) {
@@ -2015,6 +2015,23 @@ void OBSBasic::UpdateTitleBar()
 OBSBasic *OBSBasic::Get()
 {
 	return reinterpret_cast<OBSBasic *>(App()->GetMainWindow());
+}
+
+QWidget *OBSBasic::FrontendWindow() const
+{
+	// Session ownership survives hiding to the tray. Visibility must not pick
+	// the native controller again while the WebView2 window is hidden.
+	for (auto *window : findChildren<QWidget *>(QStringLiteral("obsWebView2Window"), Qt::FindDirectChildrenOnly)) {
+		if (window->property("webview2OwnsSession").toBool()) {
+			return window;
+		}
+	}
+	return const_cast<OBSBasic *>(this);
+}
+
+bool OBSBasic::IsFrontendVisible() const
+{
+	return FrontendWindow()->isVisible();
 }
 
 void OBSBasic::UpdatePatronJson(const std::string &text, const std::string &error)

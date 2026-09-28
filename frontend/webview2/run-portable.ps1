@@ -1,5 +1,5 @@
 param(
-    [string]$BuildDirectory = 'build_webview2',
+    [string]$BuildDirectory = 'build_webview2_full',
     [switch]$OnlyBundledPlugins
 )
 $ErrorActionPreference = 'Stop'

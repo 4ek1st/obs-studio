@@ -124,6 +124,17 @@ void SourceTree::dropEvent(QDropEvent *event)
 		return;
 	}
 
+	if (MoveSelectedItems(indexAt(event->position().toPoint()).row(), int(dropIndicatorPosition()))) {
+		event->accept();
+		event->setDropAction(Qt::CopyAction);
+	}
+	QListView::dropEvent(event);
+}
+
+bool SourceTree::MoveSelectedItems(int row, int position)
+{
+	if (position < int(OnItem) || position > int(OnViewport))
+		return false;
 	OBSBasic *main = OBSBasic::Get();
 
 	OBSScene scene = GetCurrentScene();
@@ -132,14 +143,14 @@ void SourceTree::dropEvent(QDropEvent *event)
 	auto &items = stm->items;
 	QModelIndexList indices = selectedIndexes();
 
-	DropIndicatorPosition indicator = dropIndicatorPosition();
-	int row = indexAt(event->position().toPoint()).row();
+	DropIndicatorPosition indicator = DropIndicatorPosition(position);
+	if (indices.empty() || row < -1 || row >= items.size())
+		return false;
 	bool emptyDrop = row == -1;
 
 	if (emptyDrop) {
 		if (!items.size()) {
-			QListView::dropEvent(event);
-			return;
+			return false;
 		}
 
 		row = items.size() - 1;
@@ -180,8 +191,7 @@ void SourceTree::dropEvent(QDropEvent *event)
 	}
 
 	if (row < 0 || row > stm->items.count()) {
-		QListView::dropEvent(event);
-		return;
+		return false;
 	}
 
 	/* --------------------------------------- */
@@ -219,8 +229,7 @@ void SourceTree::dropEvent(QDropEvent *event)
 	/* disregard as invalid drag/drop          */
 
 	if (dropGroup && hasGroups) {
-		QListView::dropEvent(event);
-		return;
+		return false;
 	}
 
 	/* --------------------------------------- */
@@ -420,10 +429,7 @@ void SourceTree::dropEvent(QDropEvent *event)
 
 	UpdateWidgets(true);
 
-	event->accept();
-	event->setDropAction(Qt::CopyAction);
-
-	QListView::dropEvent(event);
+	return true;
 }
 
 void SourceTree::selectionChanged(const QItemSelection &selected, const QItemSelection &deselected)

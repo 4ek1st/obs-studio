@@ -10,6 +10,15 @@
     labels: { "Basic.Main.Scenes": "Сцены", "Basic.Main.Sources": "Источники", "Basic.Main.Controls": "Управление" },
     studioMode: false, recording: false, streaming: false, paused: false, fps: 60,
   };
+  const action = (name, text, enabled=true) => ({id:name,name,text,enabled});
+  state.sceneToolbar=[action("actionAddScene","Добавить сцену"),action("actionRemoveScene","Удалить сцену"),{separator:true},action("actionSceneFilters","Фильтры сцены"),action("actionSceneUp","Переместить вверх"),action("actionSceneDown","Переместить вниз")];
+  state.sourceToolbar=[action("actionAddSource","Добавить источник"),action("actionRemoveSource","Удалить источник"),{separator:true},action("actionSourceProperties","Свойства"),action("actionSourceUp","Переместить вверх"),action("actionSourceDown","Переместить вниз")];
+  state.actions=[action("actionAdvAudioProperties","Расширенные свойства аудио")];
+  state.sources.forEach(x=>{x.owner="scene-1";x.depth=0;});
+  state.audio=[{uuid:"audio-1",name:"Звук рабочего стола",volume:.85,db:-3.2,muted:false,monitoring:0,enabled:true,volumeEnabled:true,visible:true},{uuid:"audio-2",name:"Микрофон",volume:.7,db:-6.5,muted:false,monitoring:0,enabled:true,volumeEnabled:true,visible:true}];
+  state.transitions=[{uuid:"fade",name:"Затухание"},{uuid:"cut",name:"Обрезка"}];state.currentTransition="fade";state.transitionDuration=300;
+  state.transitionControls=[{id:"transitionAdd",text:"Добавить переход",enabled:true},{id:"transitionRemove",text:"Удалить переход",enabled:false},{id:"transitionProps",text:"Свойства перехода",enabled:false}];
+  state.quickTransitions=[{id:"quick-cut",text:"Обрезка",enabled:true},{id:"quick-fade",text:"Затухание (300 мс)",enabled:true}];state.nativeEditor=true;state.cpu=1.6;
   function send(data) { for (const callback of events) callback({ data: structuredClone(data) }); }
   function publish() { send({ version: 1, event: "state.changed", data: state }); }
   window.chrome ??= {};
@@ -17,6 +26,13 @@
     addEventListener(type, callback) { events.add(callback); },
     removeEventListener(type, callback) { events.delete(callback); },
     postMessage(message) {
+      if(message.command==="source.visibility"||message.command==="source.lock"){const source=state.sources.find(x=>x.id===message.args.id);if(source)source[message.command==="source.lock"?"locked":"visible"]=message.args.value;}
+      if(message.command==="source.rename"){const source=state.sources.find(x=>x.id===message.args.id);if(source)source.name=message.args.name;}
+      if(message.command==="scene.rename"){const scene=state.scenes.find(x=>x.uuid===message.args.uuid);if(scene)scene.name=message.args.name;}
+      if(message.command.startsWith("audio.")){const source=state.audio.find(x=>x.uuid===message.args.uuid);if(source){if(message.command==="audio.volume")source.volume=message.args.value;if(message.command==="audio.mute")source.muted=message.args.value;if(message.command==="audio.monitor")source.monitoring=message.args.value;}}
+      if(message.command==="transition.select")state.currentTransition=message.args.uuid;
+      if(message.command==="transition.duration")state.transitionDuration=message.args.value;
+      if(message.command==="control.click"&&message.args.id==="modeSwitch")state.studioMode=!state.studioMode;
       if (message.command === "source.select") state.sources.forEach(source => source.selected = source.id === message.args.id);
       if (message.command === "menu.prepare") {
         const menu = state.menus.find(item => item.id === message.args.id);

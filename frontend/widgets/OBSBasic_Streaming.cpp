@@ -42,7 +42,7 @@ void OBSBasic::DisplayStreamStartError()
 		sysTrayStream->setEnabled(true);
 	}
 
-	QMessageBox::critical(this, QTStr("Output.StartStreamFailed"), message);
+	QMessageBox::critical(FrontendWindow(), QTStr("Output.StartStreamFailed"), message);
 }
 
 void OBSBasic::StartStreaming()
@@ -56,7 +56,7 @@ void OBSBasic::StartStreaming()
 
 	if (auth && auth->broadcastFlow()) {
 		if (!broadcastActive && !broadcastReady) {
-			QMessageBox no_broadcast(this);
+			QMessageBox no_broadcast(FrontendWindow());
 			no_broadcast.setText(QTStr("Output.NoBroadcast.Text"));
 			QPushButton *SetupBroadcast =
 				no_broadcast.addButton(QTStr("Basic.Main.SetupBroadcast"), QMessageBox::YesRole);
@@ -370,12 +370,12 @@ void OBSBasic::StreamingStop(int code, QString last_error)
 	if (encode_error) {
 		QString msg = last_error.isEmpty() ? QTStr("Output.StreamEncodeError.Msg")
 						   : QTStr("Output.StreamEncodeError.Msg.LastError").arg(last_error);
-		OBSMessageBox::information(this, QTStr("Output.StreamEncodeError.Title"), msg);
+		OBSMessageBox::information(FrontendWindow(), QTStr("Output.StreamEncodeError.Title"), msg);
 
-	} else if (code != OBS_OUTPUT_SUCCESS && isVisible()) {
-		OBSMessageBox::information(this, QTStr("Output.ConnectFail.Title"), QT_UTF8(errorMessage));
+	} else if (code != OBS_OUTPUT_SUCCESS && IsFrontendVisible()) {
+		OBSMessageBox::information(FrontendWindow(), QTStr("Output.ConnectFail.Title"), QT_UTF8(errorMessage));
 
-	} else if (code != OBS_OUTPUT_SUCCESS && !isVisible()) {
+	} else if (code != OBS_OUTPUT_SUCCESS && !IsFrontendVisible()) {
 		SysTrayNotify(QT_UTF8(errorDescription), QSystemTrayIcon::Warning);
 	}
 
@@ -394,9 +394,9 @@ void OBSBasic::StreamActionTriggered()
 		bool confirm = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStoppingStream");
 
 #ifdef YOUTUBE_ENABLED
-		if (isVisible() && auth && IsYouTubeService(auth->service()) && autoStopBroadcast) {
+		if (IsFrontendVisible() && auth && IsYouTubeService(auth->service()) && autoStopBroadcast) {
 			QMessageBox::StandardButton button = OBSMessageBox::question(
-				this, QTStr("ConfirmStop.Title"), QTStr("YouTube.Actions.AutoStopStreamingWarning"),
+				FrontendWindow(), QTStr("ConfirmStop.Title"), QTStr("YouTube.Actions.AutoStopStreamingWarning"),
 				QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 
 			if (button == QMessageBox::No) {
@@ -406,9 +406,9 @@ void OBSBasic::StreamActionTriggered()
 			confirm = false;
 		}
 #endif
-		if (confirm && isVisible()) {
+		if (confirm && IsFrontendVisible()) {
 			QMessageBox::StandardButton button =
-				OBSMessageBox::question(this, QTStr("ConfirmStop.Title"), QTStr("ConfirmStop.Text"),
+				OBSMessageBox::question(FrontendWindow(), QTStr("ConfirmStop.Title"), QTStr("ConfirmStop.Text"),
 							QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 
 			if (button == QMessageBox::No) {
@@ -449,16 +449,16 @@ void OBSBasic::StreamActionTriggered()
 			}
 		}
 
-		if (bwtest && isVisible()) {
-			QMessageBox::StandardButton button = OBSMessageBox::question(this, QTStr("ConfirmBWTest.Title"),
+		if (bwtest && IsFrontendVisible()) {
+			QMessageBox::StandardButton button = OBSMessageBox::question(FrontendWindow(), QTStr("ConfirmBWTest.Title"),
 										     QTStr("ConfirmBWTest.Text"));
 
 			if (button == QMessageBox::No) {
 				return;
 			}
-		} else if (confirm && isVisible()) {
+		} else if (confirm && IsFrontendVisible()) {
 			QMessageBox::StandardButton button =
-				OBSMessageBox::question(this, QTStr("ConfirmStart.Title"), QTStr("ConfirmStart.Text"),
+				OBSMessageBox::question(FrontendWindow(), QTStr("ConfirmStart.Title"), QTStr("ConfirmStart.Text"),
 							QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 
 			if (button == QMessageBox::No) {

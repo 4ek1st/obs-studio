@@ -1,0 +1,798 @@
+#include "QtDialogBridge.hpp"
+#include "WebView2Widget.hpp"
+
+#include <QAbstractButton>
+#include <QAbstractItemView>
+#include <QApplication>
+#include <QBuffer>
+#include <QCheckBox>
+#include <QColorDialog>
+#include <QComboBox>
+#include <QContextMenuEvent>
+#include <QDialog>
+#include <QDockWidget>
+#include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFocusEvent>
+#include <QFontDialog>
+#include <QFontInfo>
+#include <QGroupBox>
+#include <QHeaderView>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListView>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPersistentModelIndex>
+#include <QPlainTextEdit>
+#include <QPointer>
+#include <QProgressBar>
+#include <QPushButton>
+#include <QRadioButton>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSet>
+#include <QSlider>
+#include <QSpinBox>
+#include <QTabBar>
+#include <QTableView>
+#include <QTextDocument>
+#include <QTextCursor>
+#include <QTextEdit>
+#include <QTimer>
+#include <QToolButton>
+#include <QTreeView>
+#include <QWheelEvent>
+
+#include <algorithm>
+#include <cmath>
+
+namespace {
+constexpr auto surfaceProperty = "_obsWebView2DialogSurface";
+constexpr auto installedProperty = "_obsWebView2DialogInstaller";
+
+QString plainText(const QString &text)
+{
+	if (!Qt::mightBeRichText(text))
+		return text;
+	QTextDocument document;
+	document.setHtml(text);
+	return document.toPlainText();
+}
+
+QString buttonText(QString text)
+{
+	text.replace(QStringLiteral("&&"), QString(QChar(0xf000)));
+	text.remove(QLatin1Char('&'));
+	text.replace(QChar(0xf000), QLatin1Char('&'));
+	return text;
+}
+
+QJsonObject rectangle(const QRect &rect)
+{
+	return {{"x", rect.x()}, {"y", rect.y()}, {"width", rect.width()}, {"height", rect.height()}};
+}
+
+QRect visibleRectangle(QWidget *widget, QWidget *dialog)
+{
+	if (widget == dialog) return dialog->rect();
+	QRect visible(widget->mapTo(dialog, QPoint()), widget->size());
+	for (auto *parent = widget->parentWidget(); parent; parent = parent->parentWidget()) {
+		visible &= QRect(parent->mapTo(dialog, QPoint()), parent->size());
+		if (parent == dialog)
+			break;
+	}
+	return visible & dialog->rect();
+}
+
+Qt::KeyboardModifiers modifiers(const QJsonObject &args)
+{
+	Qt::KeyboardModifiers result = Qt::NoModifier;
+	if (args.value("ctrl").toBool()) result |= Qt::ControlModifier;
+	if (args.value("shift").toBool()) result |= Qt::ShiftModifier;
+	if (args.value("alt").toBool()) result |= Qt::AltModifier;
+	return result;
+}
+
+void mouseClick(QWidget *widget, QPoint point, Qt::KeyboardModifiers mods, bool twice = false,
+		Qt::MouseButton button = Qt::LeftButton)
+{
+	const QPointer<QWidget> guard(widget);
+	const auto global = widget->mapToGlobal(point);
+	QMouseEvent press(QEvent::MouseButtonPress, QPointF(point), QPointF(global), button, button, mods);
+	QApplication::sendEvent(widget, &press);
+	if (!guard) return;
+	QMouseEvent release(QEvent::MouseButtonRelease, QPointF(point), QPointF(global), button, Qt::NoButton, mods);
+	QApplication::sendEvent(widget, &release);
+	if (!guard || !twice) return;
+	QMouseEvent doubleClick(QEvent::MouseButtonDblClick, QPointF(point), QPointF(global), button, button, mods);
+	QApplication::sendEvent(widget, &doubleClick);
+	if (guard) QApplication::sendEvent(widget, &release);
+}
+
+QJsonObject scrollState(QScrollBar *scroll)
+{
+	return {{"minimum", scroll->minimum()}, {"maximum", scroll->maximum()}, {"value", scroll->value()},
+		{"page", scroll->pageStep()}};
+}
+
+QAbstractItemView *owningView(QWidget *widget)
+{
+	for (auto *parent = widget->parentWidget(); parent; parent = parent->parentWidget())
+		if (auto *view = qobject_cast<QAbstractItemView *>(parent)) return view;
+	return nullptr;
+}
+
+bool isStandardContainer(QWidget *widget)
+{
+	const QByteArray type(widget->metaObject()->className());
+	return type == "QWidget" || type == "QFrame" || type == "QStackedWidget" || type == "QTabWidget" ||
+	       type == "QSplitter" || type == "QDialogButtonBox" || type == "QWizardPage" ||
+	       type == "QScrollArea" || type == "QScrollAreaWidget" || type == "QSizeGrip";
+}
+} // namespace
+
+namespace OBSWeb {
+struct QtDialogBridge::Impl {
+	QPointer<QWidget> dialog;
+	quint64 sequence = 0;
+	QHash<QString, QPointer<QWidget>> widgets;
+	QHash<QWidget *, QString> widgetIds;
+	QHash<QString, QPersistentModelIndex> indexes;
+	QHash<QPersistentModelIndex, QString> indexIds;
+	QHash<qint64, QString> icons;
+
+	QString identify(QWidget *widget)
+	{
+		const auto previous = widgetIds.value(widget);
+		if (!previous.isEmpty() && widgets.value(previous) == widget) return previous;
+		const auto id = QString::number(++sequence);
+		widgetIds.insert(widget, id);
+		widgets.insert(id, widget);
+		return id;
+	}
+
+	QString identify(const QModelIndex &index)
+	{
+		const QPersistentModelIndex persistent(index);
+		const auto existing = indexIds.value(persistent);
+		if (!existing.isEmpty()) return existing;
+		const auto id = QStringLiteral("i%1").arg(++sequence);
+		indexes.insert(id, persistent);
+		indexIds.insert(persistent, id);
+		return id;
+	}
+
+	QString icon(const QIcon &source)
+	{
+		if (source.isNull()) return {};
+		const auto key = source.cacheKey();
+		if (icons.contains(key)) return icons.value(key);
+		QByteArray bytes;
+		QBuffer buffer(&bytes);
+		buffer.open(QIODevice::WriteOnly);
+		source.pixmap(24, 24).save(&buffer, "PNG");
+		const auto result = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(bytes.toBase64());
+		if (icons.size() > 512) icons.clear();
+		icons.insert(key, result);
+		return result;
+	}
+
+	void prune()
+	{
+		for (auto it = widgets.begin(); it != widgets.end();) {
+			if (it.value().isNull()) it = widgets.erase(it); else ++it;
+		}
+		for (auto it = widgetIds.begin(); it != widgetIds.end();) {
+			if (!widgets.contains(it.value())) it = widgetIds.erase(it); else ++it;
+		}
+		// QPersistentModelIndex's hash changes after model insertions. Rebuild its reverse map.
+		indexIds.clear();
+		for (auto it = indexes.begin(); it != indexes.end();) {
+			if (!it.value().isValid()) it = indexes.erase(it);
+			else { indexIds.insert(it.value(), it.key()); ++it; }
+		}
+	}
+
+	QJsonObject item(QAbstractItemView *view, const QModelIndex &index)
+	{
+		const auto rect = view->visualRect(index);
+		const auto flags = index.flags();
+		QJsonObject data{{"id", identify(index)}, {"row", index.row()}, {"column", index.column()},
+				 {"text", index.data(Qt::DisplayRole).toString()}, {"rect", rectangle(rect)},
+				 {"enabled", bool(flags & Qt::ItemIsEnabled)}, {"selectable", bool(flags & Qt::ItemIsSelectable)},
+				 {"editable", bool(flags & Qt::ItemIsEditable)}, {"checkable", bool(flags & Qt::ItemIsUserCheckable) && index.data(Qt::CheckStateRole).isValid()},
+				 {"checked", index.data(Qt::CheckStateRole).toInt()},
+				 {"selected", view->selectionModel() && view->selectionModel()->isSelected(index)},
+				 {"current", view->currentIndex() == index}, {"tooltip", index.data(Qt::ToolTipRole).toString()}};
+		data.insert("icon", icon(qvariant_cast<QIcon>(index.data(Qt::DecorationRole))));
+		if (auto *tree = qobject_cast<QTreeView *>(view)) {
+			data.insert("children", view->model()->hasChildren(index));
+			data.insert("expanded", tree->isExpanded(index));
+		}
+		return data;
+	}
+
+	void itemView(QAbstractItemView *view, QJsonObject &data)
+	{
+		data.insert("type", "items");
+		data.insert("viewport", rectangle(QRect(view->viewport()->mapTo(view, QPoint()), view->viewport()->size())));
+		data.insert("verticalScroll", scrollState(view->verticalScrollBar()));
+		data.insert("horizontalScroll", scrollState(view->horizontalScrollBar()));
+		data.insert("selectionMode", int(view->selectionMode()));
+		QJsonArray items;
+		const auto bounds = view->viewport()->rect();
+		auto *model = view->model();
+		if (!model) { data.insert("items", items); return; }
+		QHeaderView *header = nullptr;
+		if (auto *tree = qobject_cast<QTreeView *>(view)) {
+			header = tree->header();
+			auto index = tree->indexAt(QPoint(2, 1));
+			if (!index.isValid()) index = model->index(0, 0, view->rootIndex());
+			for (int count = 0; index.isValid() && count < 512; ++count, index = tree->indexBelow(index)) {
+				const auto rect = tree->visualRect(index);
+				if (rect.top() > bounds.bottom()) break;
+				for (int col = 0; col < model->columnCount(index.parent()); ++col) {
+					const auto cell = index.siblingAtColumn(col);
+					if (!tree->isColumnHidden(col) && tree->visualRect(cell).intersects(bounds)) items.append(item(view, cell));
+				}
+			}
+		} else if (auto *table = qobject_cast<QTableView *>(view)) {
+			header = table->horizontalHeader();
+			int first = table->rowAt(0);
+			if (first < 0) first = 0;
+			for (int row = first, count = 0; row < model->rowCount(view->rootIndex()) && count < 512; ++row, ++count) {
+				if (table->isRowHidden(row)) continue;
+				if (table->rowViewportPosition(row) > bounds.bottom()) break;
+				for (int col = 0; col < model->columnCount(view->rootIndex()); ++col) {
+					const auto index = model->index(row, col, view->rootIndex());
+					if (!table->isColumnHidden(col) && table->visualRect(index).intersects(bounds)) items.append(item(view, index));
+				}
+			}
+		} else {
+			const auto firstIndex = view->indexAt(QPoint(2, 1));
+			const int first = firstIndex.isValid() ? std::max(0, firstIndex.row() - 1) : 0;
+			for (int row = first, count = 0; row < model->rowCount(view->rootIndex()) && count < 4096; ++row, ++count) {
+				const auto index = model->index(row, 0, view->rootIndex());
+				const auto rect = view->visualRect(index);
+				if (rect.intersects(bounds)) items.append(item(view, index));
+				if (rect.top() > bounds.bottom() && !qobject_cast<QListView *>(view)->isWrapping()) break;
+			}
+		}
+		data.insert("items", items);
+		QJsonArray columns;
+		if (header && header->isVisible()) {
+			data.insert("headerRect", rectangle(QRect(header->mapTo(view, QPoint()), header->size())));
+			for (int col = 0; col < header->count(); ++col) {
+				if (header->isSectionHidden(col)) continue;
+				columns.append(QJsonObject{{"index", col}, {"text", model->headerData(col, Qt::Horizontal).toString()},
+					{"x", header->sectionViewportPosition(col)}, {"width", header->sectionSize(col)}});
+			}
+		}
+		data.insert("columns", columns);
+	}
+
+	void collect(QWidget *parent, QJsonArray &nodes, bool includeParent = false)
+	{
+		const auto candidates = includeParent ? QList<QWidget *>{parent} : parent->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly);
+		for (auto *widget : candidates) {
+			if ((widget != dialog && widget->isWindow()) || widget->property(surfaceProperty).toBool() || !widget->isVisibleTo(dialog)) continue;
+			const auto clipped = visibleRectangle(widget, dialog);
+			if (clipped.isEmpty()) continue;
+			QJsonObject data{{"id", identify(widget)}, {"name", widget->objectName()},
+				{"class", QString::fromLatin1(widget->metaObject()->className())},
+				{"rect", rectangle(QRect(widget->mapTo(dialog, QPoint()), widget->size()))},
+				{"clip", rectangle(clipped)}, {"enabled", widget->isEnabled()},
+				{"tooltip", plainText(widget->toolTip())}, {"accessibleName", widget->accessibleName()}};
+			bool atomic = true;
+			if (auto *view = owningView(widget)) data.insert("itemView", identify(view));
+			if (widget->inherits("SourceSelectButton") || widget->inherits("OBSHotkeyLabel") || widget->inherits("BalanceSlider") ||
+			    widget->inherits("AbsoluteSlider")) {
+				// These controls have custom paint/drag/click contracts beyond their Qt base class.
+				data.insert("type", "native");
+			} else if (auto *button = qobject_cast<QAbstractButton *>(widget)) {
+				const bool check = qobject_cast<QCheckBox *>(button), radio = qobject_cast<QRadioButton *>(button);
+				data.insert("type", check ? "check" : radio ? "radio" : "button");
+				data.insert("text", buttonText(button->text()));
+				data.insert("icon", icon(button->icon()));
+				data.insert("checkable", button->isCheckable()); data.insert("checked", button->isChecked());
+				if (auto *box = qobject_cast<QCheckBox *>(button)) data.insert("indeterminate", box->checkState() == Qt::PartiallyChecked);
+				if (auto *push = qobject_cast<QPushButton *>(button)) { data.insert("default", push->isDefault()); data.insert("menu", push->menu() != nullptr); }
+				if (auto *tool = qobject_cast<QToolButton *>(button)) data.insert("menu", tool->menu() != nullptr);
+			} else if (auto *combo = qobject_cast<QComboBox *>(widget)) {
+				data.insert("type", "combo"); data.insert("index", combo->currentIndex());
+				data.insert("editable", combo->isEditable()); data.insert("value", combo->currentText());
+				QJsonArray choices;
+				for (int i = 0; i < combo->count(); ++i) choices.append(QJsonObject{{"text", combo->itemText(i)},
+					{"enabled", bool(combo->model()->index(i, combo->modelColumn(), combo->rootModelIndex()).flags() & Qt::ItemIsEnabled)}});
+				data.insert("choices", choices);
+			} else if (auto *spin = qobject_cast<QSpinBox *>(widget)) {
+				data.insert("type", "number"); data.insert("value", spin->value()); data.insert("minimum", spin->minimum());
+				data.insert("maximum", spin->maximum()); data.insert("step", spin->singleStep()); data.insert("readOnly", spin->isReadOnly());
+				data.insert("prefix", spin->prefix()); data.insert("suffix", spin->suffix());
+			} else if (auto *spin = qobject_cast<QDoubleSpinBox *>(widget)) {
+				data.insert("type", "number"); data.insert("value", spin->value()); data.insert("minimum", spin->minimum());
+				data.insert("maximum", spin->maximum()); data.insert("step", spin->singleStep()); data.insert("readOnly", spin->isReadOnly());
+				data.insert("prefix", spin->prefix()); data.insert("suffix", spin->suffix()); data.insert("decimals", spin->decimals());
+			} else if (auto *edit = qobject_cast<QLineEdit *>(widget)) {
+				// Hotkey editors consume native key events and must retain their own surface.
+				if (widget->inherits("OBSHotkeyEdit")) data.insert("type", "native");
+				else {
+					data.insert("type", "text"); data.insert("value", edit->text());
+					data.insert("password", edit->echoMode() != QLineEdit::Normal);
+					data.insert("placeholder", edit->placeholderText()); data.insert("readOnly", edit->isReadOnly());
+					data.insert("maxLength", edit->maxLength());
+					data.insert("selectionStart", edit->selectionStart()); data.insert("selectionLength", edit->selectedText().size());
+				}
+			} else if (auto *edit = qobject_cast<QTextEdit *>(widget)) {
+				data.insert("type", "multiline"); data.insert("value", edit->toPlainText());
+				data.insert("readOnly", edit->isReadOnly()); data.insert("placeholder", edit->placeholderText());
+			} else if (auto *edit = qobject_cast<QPlainTextEdit *>(widget)) {
+				data.insert("type", "multiline"); data.insert("value", edit->toPlainText());
+				data.insert("readOnly", edit->isReadOnly()); data.insert("placeholder", edit->placeholderText());
+			} else if (auto *label = qobject_cast<QLabel *>(widget)) {
+				data.insert("type", label->text().contains(QStringLiteral("<a "), Qt::CaseInsensitive) ? "native" : "label");
+				data.insert("text", plainText(label->text()));
+				data.insert("wordWrap", label->wordWrap());
+				data.insert("alignment", int(label->alignment()));
+				if (label->text().isEmpty() && !label->pixmap().isNull()) data.insert("icon", icon(QIcon(label->pixmap())));
+			} else if (auto *bar = qobject_cast<QTabBar *>(widget)) {
+				data.insert("type", "tabs"); data.insert("index", bar->currentIndex());
+				QJsonArray tabs;
+				for (int i = 0; i < bar->count(); ++i) if (bar->isTabVisible(i))
+					tabs.append(QJsonObject{{"index", i}, {"text", buttonText(bar->tabText(i))}, {"enabled", bar->isTabEnabled(i)}, {"rect", rectangle(bar->tabRect(i))}});
+				data.insert("tabs", tabs);
+				atomic = false;
+			} else if (auto *view = qobject_cast<QAbstractItemView *>(widget); view && !qobject_cast<QHeaderView *>(view)) {
+				if (view->dragDropMode() == QAbstractItemView::NoDragDrop &&
+				    (qobject_cast<QTreeView *>(view) || qobject_cast<QTableView *>(view) || qobject_cast<QListView *>(view))) {
+					itemView(view, data);
+					nodes.append(data);
+					// Persistent index widgets and active delegates are real Qt controls too.
+					collect(view->viewport(), nodes);
+					continue;
+				}
+				data.insert("type", "native");
+			} else if (auto *area = qobject_cast<QScrollArea *>(widget)) {
+				data.insert("type", "scrollArea");
+				data.insert("verticalScroll", scrollState(area->verticalScrollBar()));
+				data.insert("horizontalScroll", scrollState(area->horizontalScrollBar()));
+				atomic = false;
+			} else if (auto *scroll = qobject_cast<QScrollBar *>(widget)) {
+				data.insert("type", "scroll"); data.insert("minimum", scroll->minimum()); data.insert("maximum", scroll->maximum());
+				data.insert("value", scroll->value()); data.insert("step", scroll->singleStep()); data.insert("vertical", scroll->orientation() == Qt::Vertical);
+			} else if (auto *slider = qobject_cast<QAbstractSlider *>(widget)) {
+				data.insert("type", "slider"); data.insert("minimum", slider->minimum()); data.insert("maximum", slider->maximum());
+				data.insert("value", slider->value()); data.insert("step", slider->singleStep()); data.insert("vertical", slider->orientation() == Qt::Vertical);
+			} else if (auto *group = qobject_cast<QGroupBox *>(widget)) {
+				data.insert("type", "group"); data.insert("text", buttonText(group->title())); data.insert("checkable", group->isCheckable());
+				data.insert("checked", group->isChecked()); atomic = false;
+			} else if (auto *progress = qobject_cast<QProgressBar *>(widget)) {
+				data.insert("type", "progress"); data.insert("minimum", progress->minimum()); data.insert("maximum", progress->maximum());
+				data.insert("value", progress->value()); data.insert("text", progress->text());
+			} else {
+				auto children = widget->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly);
+				children.removeIf([](QWidget *child) { return child->property(surfaceProperty).toBool(); });
+				if (widget->inherits("OBSQTDisplay") || widget->inherits("OBSBasicPreview") ||
+				    (children.isEmpty() && (!isStandardContainer(widget) || QByteArray(widget->metaObject()->className()) == "QWidget"))) {
+					data.insert("type", "native");
+				} else { atomic = false; }
+			}
+			if (data.contains("type")) nodes.append(data);
+			if (!atomic) collect(widget, nodes);
+		}
+	}
+};
+
+QtDialogBridge::QtDialogBridge(QWidget *dialog, QObject *parent) : QObject(parent), impl(std::make_unique<Impl>())
+{
+	impl->dialog = dialog;
+}
+
+QtDialogBridge::~QtDialogBridge() = default;
+
+QJsonObject QtDialogBridge::snapshot()
+{
+	if (!impl->dialog) return {{"closed", true}};
+	impl->prune();
+	QJsonArray nodes;
+	impl->collect(impl->dialog, nodes, !qobject_cast<QDialog *>(impl->dialog));
+	const auto palette = impl->dialog->palette();
+	const auto font = QFontInfo(impl->dialog->font());
+	const auto requestedFont = impl->dialog->font();
+	const int fontSize = requestedFont.pixelSize() > 0 ? requestedFont.pixelSize() : font.pixelSize() > 0 ? font.pixelSize() :
+		std::max(1, qRound(requestedFont.pointSizeF() * impl->dialog->logicalDpiY() / 72.0));
+	const QJsonObject theme{{"window", palette.color(QPalette::Window).name()}, {"windowText", palette.color(QPalette::WindowText).name()},
+		{"base", palette.color(QPalette::Base).name()}, {"text", palette.color(QPalette::Text).name()},
+		{"button", palette.color(QPalette::Button).name()}, {"buttonText", palette.color(QPalette::ButtonText).name()},
+		{"mid", palette.color(QPalette::Mid).name()}, {"highlight", palette.color(QPalette::Highlight).name()},
+		{"highlightedText", palette.color(QPalette::HighlightedText).name()}, {"fontFamily", font.family()},
+		{"fontSize", fontSize}, {"dark", palette.color(QPalette::Window).lightness() < 128}};
+	const auto title = impl->dialog->windowTitle().isEmpty() ? impl->dialog->window()->windowTitle() : impl->dialog->windowTitle();
+	return {{"title", title}, {"width", impl->dialog->width()}, {"height", impl->dialog->height()},
+		{"focus", impl->widgetIds.value(impl->dialog->focusWidget())},
+		{"enabled", impl->dialog->isEnabled()}, {"nodes", nodes}, {"theme", theme}, {"closed", !impl->dialog->isVisible()}};
+}
+
+bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QString &error)
+{
+	error.clear();
+	auto reject = [&](const char *reason) { error = QString::fromLatin1(reason); return false; };
+	const QPointer<QWidget> dialog(impl->dialog);
+	if (!dialog || !dialog->isVisible() || !dialog->isEnabled()) return reject("Dialog is no longer available");
+	if (QApplication::activeModalWidget() && QApplication::activeModalWidget() != dialog->window()) return reject("Complete the active dialog first");
+	QPointer<QWidget> widget = impl->widgets.value(args.value("id").toString());
+	if (command == "dialog.key" && !args.contains("id")) widget = dialog.data();
+	if (!widget || (widget != dialog && !dialog->isAncestorOf(widget)) || !widget->isVisibleTo(dialog) || !widget->isEnabled())
+		return reject("Control is no longer available");
+	if (command == "dialog.click") {
+		if (auto *button = qobject_cast<QAbstractButton *>(widget)) { button->click(); return true; }
+		if (auto *group = qobject_cast<QGroupBox *>(widget); group && group->isCheckable()) {
+			group->setChecked(!group->isChecked()); if (widget) emit group->clicked(group->isChecked()); return true;
+		}
+	} else if (command == "dialog.menu") {
+		if (auto *tool = qobject_cast<QToolButton *>(widget); tool && tool->menu()) { tool->showMenu(); return true; }
+		if (auto *button = qobject_cast<QPushButton *>(widget); button && button->menu()) { button->showMenu(); return true; }
+		return reject("Control has no menu");
+	} else if (command == "dialog.input") {
+		const auto value = args.value("value");
+		if (auto *edit = qobject_cast<QLineEdit *>(widget)) {
+			if (edit->isReadOnly() || !value.isString() || value.toString().size() > edit->maxLength()) return reject("Invalid text input");
+			QString proposed = value.toString(); int position = proposed.size();
+			if (edit->validator() && edit->validator()->validate(proposed, position) == QValidator::Invalid) return reject("Invalid text input");
+			if (edit->text() != proposed) { edit->selectAll(); edit->insert(proposed); }
+			return true;
+		}
+		if (auto *edit = qobject_cast<QTextEdit *>(widget)) {
+			if (edit->isReadOnly() || !value.isString()) return reject("Read only text");
+			if (edit->toPlainText() != value.toString()) {
+				auto cursor = edit->textCursor(); cursor.select(QTextCursor::Document); cursor.insertText(value.toString());
+			}
+			return true;
+		}
+		if (auto *edit = qobject_cast<QPlainTextEdit *>(widget)) {
+			if (edit->isReadOnly() || !value.isString()) return reject("Read only text");
+			if (edit->toPlainText() != value.toString()) {
+				auto cursor = edit->textCursor(); cursor.select(QTextCursor::Document); cursor.insertText(value.toString());
+			}
+			return true;
+		}
+		if (auto *combo = qobject_cast<QComboBox *>(widget)) {
+			if (!combo->isEditable() || !value.isString()) return reject("Choice is not editable");
+			combo->setEditText(value.toString());
+			if (widget && combo->lineEdit()) emit combo->lineEdit()->textEdited(value.toString());
+			return true;
+		}
+		if (!value.isDouble() || !std::isfinite(value.toDouble())) return reject("Invalid numeric input");
+		const auto number = value.toDouble();
+		if (auto *spin = qobject_cast<QSpinBox *>(widget)) {
+			if (spin->isReadOnly() || number < spin->minimum() || number > spin->maximum() || std::floor(number) != number) return reject("Number is out of range");
+			spin->setValue(int(number)); return true;
+		}
+		if (auto *spin = qobject_cast<QDoubleSpinBox *>(widget)) {
+			if (spin->isReadOnly() || number < spin->minimum() || number > spin->maximum()) return reject("Number is out of range");
+			spin->setValue(number); return true;
+		}
+		if (auto *slider = qobject_cast<QAbstractSlider *>(widget)) {
+			if (number < slider->minimum() || number > slider->maximum() || std::floor(number) != number) return reject("Number is out of range");
+			slider->setSliderDown(true); if (widget) slider->setSliderPosition(int(number));
+			if (widget) slider->setValue(int(number));
+			return true;
+		}
+	} else if (command == "dialog.selection") {
+		const int start = args.value("start").toInt(-1), end = args.value("end").toInt(-1);
+		if (start < 0 || end < start) return reject("Invalid text selection");
+		if (auto *edit = qobject_cast<QLineEdit *>(widget)) {
+			if (end > edit->text().size()) return reject("Invalid text selection");
+			edit->setSelection(start, end - start); return true;
+		}
+		QTextCursor cursor;
+		if (auto *edit = qobject_cast<QTextEdit *>(widget)) cursor = edit->textCursor();
+		if (auto *edit = qobject_cast<QPlainTextEdit *>(widget)) cursor = edit->textCursor();
+		if (cursor.isNull() || end >= cursor.document()->characterCount()) return reject("Invalid text selection");
+		cursor.setPosition(start); cursor.setPosition(end, QTextCursor::KeepAnchor);
+		if (auto *edit = qobject_cast<QTextEdit *>(widget)) edit->setTextCursor(cursor);
+		if (auto *edit = qobject_cast<QPlainTextEdit *>(widget)) edit->setTextCursor(cursor);
+		return true;
+	} else if (command == "dialog.finish") {
+		if (owningView(widget)) {
+			QFocusEvent event(QEvent::FocusOut, Qt::OtherFocusReason);
+			QApplication::sendEvent(widget, &event); return true;
+		}
+		if (auto *edit = qobject_cast<QLineEdit *>(widget)) { if (edit->hasAcceptableInput()) emit edit->editingFinished(); return true; }
+		if (auto *spin = qobject_cast<QAbstractSpinBox *>(widget)) { spin->interpretText(); if (widget) emit spin->editingFinished(); return true; }
+		if (auto *combo = qobject_cast<QComboBox *>(widget); combo && combo->lineEdit()) { emit combo->lineEdit()->editingFinished(); return true; }
+		if (auto *slider = qobject_cast<QAbstractSlider *>(widget)) { slider->setSliderDown(false); return true; }
+		return true;
+	} else if (command == "dialog.choose") {
+		const auto value = args.value("index");
+		if (!value.isDouble() || value.toDouble() != value.toInt(-1)) return reject("Invalid choice");
+		const auto index = value.toInt(-1);
+		if (auto *combo = qobject_cast<QComboBox *>(widget)) {
+			if (index < 0 || index >= combo->count() || !(combo->model()->index(index, combo->modelColumn(), combo->rootModelIndex()).flags() & Qt::ItemIsEnabled)) return reject("Choice is no longer available");
+			combo->setCurrentIndex(index);
+			if (widget) emit combo->activated(index);
+			if (widget) emit combo->textActivated(combo->currentText());
+			return true;
+		}
+		if (auto *tabs = qobject_cast<QTabBar *>(widget)) {
+			if (index < 0 || index >= tabs->count() || !tabs->isTabEnabled(index) || !tabs->isTabVisible(index)) return reject("Tab is no longer available");
+			tabs->setCurrentIndex(index); return true;
+		}
+	} else if (command == "dialog.item") {
+		auto *view = qobject_cast<QAbstractItemView *>(widget);
+		const auto index = impl->indexes.value(args.value("item").toString());
+		if (!view || !index.isValid() || index.model() != view->model() || !(index.flags() & Qt::ItemIsEnabled)) return reject("Item is no longer available");
+		const auto action = args.value("action").toString();
+		if (action == "toggle") {
+			if (!(index.flags() & Qt::ItemIsUserCheckable)) return reject("Item is not checkable");
+			return view->model()->setData(index, index.data(Qt::CheckStateRole).toInt() == Qt::Checked ? Qt::Unchecked : Qt::Checked, Qt::CheckStateRole);
+		}
+		if (action == "expand") {
+			auto *tree = qobject_cast<QTreeView *>(view);
+			if (!tree) return reject("Item has no expansion control");
+			tree->setExpanded(index, !tree->isExpanded(index)); return true;
+		}
+		if (action == "edit") {
+			if (!(index.flags() & Qt::ItemIsEditable)) return reject("Item is not editable");
+			view->edit(index); return true;
+		}
+		if (action == "set") {
+			if (!(index.flags() & Qt::ItemIsEditable) || !args.value("value").isString()) return reject("Item is not editable");
+			return view->model()->setData(index, args.value("value").toString(), Qt::EditRole);
+		}
+		if (action != "select" && action != "activate" && action != "context") return reject("Unknown item action");
+		view->scrollTo(index);
+		const auto point = view->visualRect(index).center();
+		if (action == "context") {
+			mouseClick(view->viewport(), point, modifiers(args), false, Qt::RightButton);
+			if (!widget) return true;
+			QContextMenuEvent event(QContextMenuEvent::Mouse, point, view->viewport()->mapToGlobal(point), modifiers(args));
+			QApplication::sendEvent(view->viewport(), &event);
+		} else mouseClick(view->viewport(), point, modifiers(args), action == "activate");
+		return true;
+	} else if (command == "dialog.scroll") {
+		auto *area = qobject_cast<QAbstractScrollArea *>(widget);
+		if (!area) return reject("Control cannot scroll");
+		auto *bar = args.value("horizontal").toBool() ? area->horizontalScrollBar() : area->verticalScrollBar();
+		const auto value = args.value("value");
+		if (!value.isDouble() || value.toDouble() < bar->minimum() || value.toDouble() > bar->maximum()) return reject("Invalid scroll position");
+		bar->setValue(value.toInt()); return true;
+	} else if (command == "dialog.wheel") {
+		auto *area = qobject_cast<QAbstractScrollArea *>(widget);
+		const auto dx = args.value("deltaX"), dy = args.value("deltaY");
+		if (!area || !dx.isDouble() || !dy.isDouble() || !std::isfinite(dx.toDouble()) || !std::isfinite(dy.toDouble()))
+			return reject("Invalid wheel input");
+		const QPoint delta(qRound(std::clamp(-dx.toDouble(), -1200.0, 1200.0)), qRound(std::clamp(-dy.toDouble(), -1200.0, 1200.0)));
+		const auto point = area->viewport()->rect().center();
+		QWheelEvent event(QPointF(point), QPointF(area->viewport()->mapToGlobal(point)), QPoint(), delta,
+			Qt::NoButton, modifiers(args), Qt::NoScrollPhase, false);
+		QApplication::sendEvent(area->viewport(), &event); return true;
+	} else if (command == "dialog.context") {
+		const auto point = widget->rect().center();
+		QContextMenuEvent event(QContextMenuEvent::Mouse, point, widget->mapToGlobal(point), modifiers(args));
+		QApplication::sendEvent(widget, &event); return true;
+	} else if (command == "dialog.header") {
+		QHeaderView *header = nullptr;
+		if (auto *tree = qobject_cast<QTreeView *>(widget)) header = tree->header();
+		if (auto *table = qobject_cast<QTableView *>(widget)) header = table->horizontalHeader();
+		const int column = args.value("column").toInt(-1);
+		if (!header || column < 0 || column >= header->count() || header->isSectionHidden(column)) return reject("Column is no longer available");
+		mouseClick(header->viewport(), QPoint(header->sectionViewportPosition(column) + header->sectionSize(column) / 2, header->height() / 2), modifiers(args));
+		return true;
+	} else if (command == "dialog.key") {
+		const auto key = args.value("key").toString();
+		static const QHash<QString, int> keys{{"Enter", Qt::Key_Return}, {"Escape", Qt::Key_Escape}, {"Delete", Qt::Key_Delete},
+			{"Backspace", Qt::Key_Backspace}, {"ArrowUp", Qt::Key_Up}, {"ArrowDown", Qt::Key_Down}, {"ArrowLeft", Qt::Key_Left},
+			{"ArrowRight", Qt::Key_Right}, {"Home", Qt::Key_Home}, {"End", Qt::Key_End}, {"PageUp", Qt::Key_PageUp},
+			{"PageDown", Qt::Key_PageDown}, {"F2", Qt::Key_F2}, {" ", Qt::Key_Space}};
+		int code = keys.value(key, 0);
+		if (!code && key.size() == 1) code = key.toUpper().at(0).unicode();
+		if (!code) return reject("Unsupported key");
+		QKeyEvent press(QEvent::KeyPress, code, modifiers(args), key.size() == 1 ? key : QString());
+		QApplication::sendEvent(widget, &press);
+		if (widget) { QKeyEvent release(QEvent::KeyRelease, code, modifiers(args)); QApplication::sendEvent(widget, &release); }
+		return true;
+	}
+	return reject("Unsupported control action");
+}
+} // namespace OBSWeb
+
+namespace {
+class DialogSurface : public QObject {
+	QPointer<QWidget> dialog;
+	QPointer<WebView2Widget> web;
+	OBSWeb::QtDialogBridge bridge;
+	QTimer timer;
+	QByteArray lastSnapshot;
+	bool ready = false;
+	bool failed = false;
+
+public:
+	DialogSurface(QWidget *target, const QString &assets, const QString &profile, QObject *owner)
+		: QObject(owner), dialog(target), bridge(target, this)
+	{
+		target->installEventFilter(this);
+		web = new WebView2Widget(target, assets, profile, QStringLiteral("dialog.html"));
+		web->setProperty(surfaceProperty, true);
+		web->setObjectName(QStringLiteral("obsWebView2DialogSurface"));
+		web->setGeometry(target->rect());
+		// Keep the native dialog operable until the document has actually loaded.
+		web->hide();
+		connect(target, &QObject::destroyed, this, [this] { dialog = nullptr; web = nullptr; deleteLater(); });
+		connect(web, &WebView2Widget::ready, this, [this] {
+			if (!dialog || !web) return;
+			ready = true; failed = false;
+			web->setGeometry(dialog->rect()); web->show(); web->raise();
+			publish(true);
+			web->setFocus(Qt::OtherFocusReason);
+		});
+		connect(web, &WebView2Widget::failed, this, [this](const QString &) {
+			failed = true; ready = false;
+			if (web) web->hide();
+			if (dialog) dialog->setProperty("webview2NativeFallback", true);
+		});
+		connect(web, &WebView2Widget::messageReceived, this, [this](const QJsonObject &request) {
+			const QPointer<DialogSurface> guard(this);
+			if (!dialog || !web) return;
+			const auto command = request.value("command").toString();
+			QString error;
+			const bool ok = command == "dialog.state" || bridge.execute(command, request.value("args").toObject(), error);
+			if (!guard || !web) return;
+			QJsonObject response{{"version", 1}, {"id", request.value("id")}, {"ok", ok}};
+			if (ok) response.insert("result", QJsonObject{});
+			else response.insert("error", QJsonObject{{"code", "DialogActionRejected"}, {"message", error}});
+			web->postMessage(response);
+			publish(true);
+		});
+		timer.setInterval(120);
+		connect(&timer, &QTimer::timeout, this, [this] { publish(false); });
+		timer.start();
+	}
+
+	~DialogSurface() override { if (web) delete web.data(); }
+
+	void retire()
+	{
+		timer.stop();
+		if (web) web->hide();
+		if (dialog) dialog->removeEventFilter(this);
+		dialog = nullptr;
+		deleteLater();
+	}
+
+	void publish(bool force)
+	{
+		if (!ready || failed || !dialog || !dialog->isVisible() || !web) return;
+		const auto state = bridge.snapshot();
+		const auto json = QJsonDocument(state).toJson(QJsonDocument::Compact);
+		if (!force && json == lastSnapshot) return;
+		lastSnapshot = json;
+		QRegion region(dialog->rect());
+		bool hasNative = false;
+		for (const auto entry : state.value("nodes").toArray()) {
+			const auto node = entry.toObject();
+			if (node.value("type") != "native") continue;
+			const auto rect = node.value("clip").toObject();
+			region -= QRect(rect.value("x").toInt(), rect.value("y").toInt(), rect.value("width").toInt(), rect.value("height").toInt());
+			hasNative = true;
+		}
+		if (hasNative && region.isEmpty()) {
+			// Qt treats an empty mask as no mask, which would cover the native control.
+			web->hide();
+		} else {
+			if (hasNative) web->setMask(region); else web->clearMask();
+			if (!web->isVisible()) { web->show(); web->raise(); }
+		}
+		web->postMessage({{"version", 1}, {"event", "dialog.state"}, {"data", state}});
+	}
+
+	bool eventFilter(QObject *watched, QEvent *event) override
+	{
+		if (watched == dialog && web) {
+			if (event->type() == QEvent::Resize) { web->setGeometry(dialog->rect()); lastSnapshot.clear(); }
+			if (event->type() == QEvent::Show && ready && !failed) { web->show(); web->raise(); publish(true); }
+		}
+		return QObject::eventFilter(watched, event);
+	}
+};
+
+class DialogInstaller : public QObject {
+	QString assets;
+	QString profile;
+	QHash<QWidget *, QPointer<DialogSurface>> surfaces;
+	QHash<QDockWidget *, QPointer<QWidget>> dockContents;
+	QSet<QDockWidget *> queuedDocks;
+
+	void ensureSurface(QWidget *content)
+	{
+		if (!content || !content->isVisible() || content->property(surfaceProperty).toBool() || surfaces.value(content)) return;
+		auto *surface = new DialogSurface(content, assets, profile, this);
+		surfaces.insert(content, surface);
+		connect(content, &QObject::destroyed, this, [this, content] { surfaces.remove(content); });
+	}
+
+	void retireSurface(QWidget *content)
+	{
+		if (auto surface = surfaces.take(content)) surface->retire();
+	}
+
+	void refreshDock(QDockWidget *dock)
+	{
+		auto *content = dock->isFloating() && dock->isVisible() ? dock->widget() : nullptr;
+		const auto previous = dockContents.value(dock);
+		if (previous && previous != content) retireSurface(previous);
+		dockContents.insert(dock, content);
+		// The Qt dock titlebar keeps its native move, dock, float, and close behavior.
+		if (content) ensureSurface(content);
+	}
+
+	void queueDock(QDockWidget *dock)
+	{
+		if (queuedDocks.contains(dock)) return;
+		queuedDocks.insert(dock);
+		const QPointer<QDockWidget> guard(dock);
+		QTimer::singleShot(0, this, [this, guard, dock] {
+			queuedDocks.remove(dock);
+			if (guard) refreshDock(guard);
+		});
+	}
+
+	void watchDock(QDockWidget *dock)
+	{
+		if (dockContents.contains(dock)) return;
+		dockContents.insert(dock, nullptr);
+		connect(dock, &QDockWidget::topLevelChanged, this, [this, dock](bool floating) {
+			if (!floating) {
+				retireSurface(dockContents.value(dock));
+				dockContents[dock] = nullptr;
+			}
+			queueDock(dock);
+		});
+		connect(dock, &QObject::destroyed, this, [this, dock] {
+			retireSurface(dockContents.take(dock));
+			queuedDocks.remove(dock);
+		});
+		queueDock(dock);
+	}
+
+public:
+	DialogInstaller(QObject *owner, QString assetsPath, QString profilePath)
+		: QObject(owner), assets(std::move(assetsPath)), profile(std::move(profilePath))
+	{
+		qApp->installEventFilter(this);
+		for (auto *widget : QApplication::allWidgets())
+			if (auto *dock = qobject_cast<QDockWidget *>(widget)) watchDock(dock);
+	}
+
+	bool eventFilter(QObject *object, QEvent *event) override
+	{
+		if (auto *dock = qobject_cast<QDockWidget *>(object)) {
+			if (event->type() == QEvent::Show || event->type() == QEvent::Hide || event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildRemoved) {
+				watchDock(dock);
+				queueDock(dock);
+			}
+		}
+		if (event->type() != QEvent::Show) return false;
+		auto *dialog = qobject_cast<QDialog *>(object);
+		if (!dialog || dialog->property(surfaceProperty).toBool() || qobject_cast<QFileDialog *>(dialog) ||
+		    qobject_cast<QColorDialog *>(dialog) || qobject_cast<QFontDialog *>(dialog) || surfaces.value(dialog)) return false;
+		// Queue outside QWidget::show and outside any WebView2 COM callback.
+		const QPointer<QDialog> guard(dialog);
+		QTimer::singleShot(0, this, [this, guard] {
+			if (guard) ensureSurface(guard);
+		});
+		return false;
+	}
+};
+} // namespace
+
+void InstallWebView2Dialogs(QObject *owner, const QString &assets, const QString &profile)
+{
+	if (!owner || !qApp || owner->property(installedProperty).toBool()) return;
+	owner->setProperty(installedProperty, true);
+	new DialogInstaller(owner, assets, profile);
+}

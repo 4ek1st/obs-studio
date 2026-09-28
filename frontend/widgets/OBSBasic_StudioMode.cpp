@@ -31,6 +31,7 @@
 void OBSBasic::CreateProgramDisplay()
 {
 	program = new OBSQTDisplay();
+	program->setObjectName(QStringLiteral("studioProgramPreview"));
 
 	program->setContextMenuPolicy(Qt::CustomContextMenu);
 	connect(program.data(), &QWidget::customContextMenuRequested, this, &OBSBasic::ProgramViewContextMenuRequested);
@@ -70,18 +71,21 @@ void OBSBasic::CreateProgramOptions()
 	layout->setSpacing(4);
 
 	QPushButton *configTransitions = new QPushButton();
+	configTransitions->setObjectName(QStringLiteral("studioConfigTransitions"));
 	configTransitions->setProperty("class", "icon-dots-vert");
 
 	QHBoxLayout *mainButtonLayout = new QHBoxLayout();
 	mainButtonLayout->setSpacing(2);
 
 	transitionButton = new QPushButton(QTStr("Transition"));
+	transitionButton->setObjectName(QStringLiteral("studioTransition"));
 	transitionButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
 	QHBoxLayout *quickTransitionsLayout = new QHBoxLayout();
 	quickTransitionsLayout->setSpacing(2);
 
 	QPushButton *addQuickTransition = new QPushButton();
+	addQuickTransition->setObjectName(QStringLiteral("studioAddQuickTransition"));
 	addQuickTransition->setProperty("class", "icon-plus");
 
 	QLabel *quickTransitionsLabel = new QLabel(QTStr("QuickTransitions"));
@@ -94,6 +98,7 @@ void OBSBasic::CreateProgramOptions()
 	mainButtonLayout->addWidget(configTransitions);
 
 	tBar = new SliderIgnoreClick(Qt::Horizontal);
+	tBar->setObjectName(QStringLiteral("studioTBar"));
 	tBar->setMinimum(0);
 	tBar->setMaximum(T_BAR_PRECISION - 1);
 

@@ -1,5 +1,8 @@
 #include "WebView2Widget.hpp"
 #include "BridgeProtocol.hpp"
+#include "WebView2Drop.hpp"
+#include <QApplication>
+#include <QSaveFile>
 
 #include <QDir>
 #include <QEvent>
@@ -18,18 +21,21 @@ using Microsoft::WRL::ComPtr;
 struct WebView2Widget::Impl {
 	QString assets;
 	QString profile;
+	QString document;
 	bool comInitialized = false;
 	bool loaded = false;
+	bool boundsUpdatePending = false;
 	ComPtr<ICoreWebView2Environment> environment;
 	ComPtr<ICoreWebView2Controller> controller;
 	ComPtr<ICoreWebView2> webview;
 };
 
-WebView2Widget::WebView2Widget(QWidget *parent, QString assetsPath, QString profilePath)
+WebView2Widget::WebView2Widget(QWidget *parent, QString assetsPath, QString profilePath, QString document)
 	: QWidget(parent), impl(std::make_unique<Impl>())
 {
 	impl->assets = QDir(assetsPath).absolutePath();
 	impl->profile = QDir(profilePath).absolutePath();
+	impl->document = std::move(document);
 	setAttribute(Qt::WA_NativeWindow);
 	setFocusPolicy(Qt::StrongFocus);
 	QTimer::singleShot(0, this, [this] { initialize(); });
@@ -57,7 +63,8 @@ void WebView2Widget::reportFailure(const QString &stage, long result)
 
 void WebView2Widget::initialize()
 {
-	if (!QFileInfo::exists(impl->assets + QStringLiteral("/index.html")) ||
+	if (QFileInfo(impl->document).fileName() != impl->document || !impl->document.endsWith(QStringLiteral(".html")) ||
+	    !QFileInfo::exists(impl->assets + QLatin1Char('/') + impl->document) ||
 	    !QDir().mkpath(impl->profile)) {
 		reportFailure(QStringLiteral("WebView2 local resources or profile unavailable"), E_FAIL);
 		return;
@@ -120,6 +127,11 @@ void WebView2Widget::initialize()
 								settings->put_IsStatusBarEnabled(FALSE);
 								settings->put_IsZoomControlEnabled(FALSE);
 								settings->put_AreHostObjectsAllowed(FALSE);
+								ComPtr<ICoreWebView2Settings4> autofill;
+								if (SUCCEEDED(settings.As(&autofill))) {
+									autofill->put_IsPasswordAutosaveEnabled(FALSE);
+									autofill->put_IsGeneralAutofillEnabled(FALSE);
+								}
 								ComPtr<ICoreWebView2Settings3> keyboardSettings;
 								if (SUCCEEDED(settings.As(&keyboardSettings)))
 									keyboardSettings->put_AreBrowserAcceleratorKeysEnabled(FALSE);
@@ -163,12 +175,27 @@ void WebView2Widget::initialize()
 										args->get_Source(&source);
 										args->get_WebMessageAsJson(&json);
 										QString error;
+										const QString sourceUrl = source ? QString::fromWCharArray(source) : QString();
 										const auto request = OBSWeb::ParseRequest(
-											source ? QString::fromWCharArray(source) : QString(),
+											sourceUrl,
 											json ? QString::fromWCharArray(json).toUtf8() : QByteArray(), error);
 										CoTaskMemFree(source);
 										CoTaskMemFree(json);
 										if (request) {
+											if (request->command == QStringLiteral("external.drop")) {
+												std::optional<OBSWeb::ExternalDropData> drop;
+												if (guard->impl->document == QStringLiteral("index.html") && OBSWeb::IsExternalDropOrigin(sourceUrl))
+													drop = OBSWeb::ReadExternalDrop(args, request->args, error);
+												else error = QStringLiteral("External drops are only accepted by the workspace.");
+												const QString id = request->id;
+												QTimer::singleShot(0, guard.data(), [guard, drop, error, id] {
+													if (!guard || !guard->impl->loaded) return;
+													if (drop) emit guard->externalDrop(id, *drop);
+													else guard->postMessage({{"version", 1}, {"id", id}, {"ok", false},
+														{"error", QJsonObject{{"code", "InvalidDrop"}, {"message", error}}}});
+												});
+												return S_OK;
+											}
 											const QJsonObject message{{QStringLiteral("version"), 1},
 														  {QStringLiteral("id"), request->id},
 														  {QStringLiteral("command"), request->command},
@@ -198,6 +225,8 @@ void WebView2Widget::initialize()
 										QTimer::singleShot(0, guard.data(), [guard] {
 											if (guard)
 												emit guard->ready();
+											if (guard)
+												guard->queueBoundsUpdate();
 										});
 										return S_OK;
 									}).Get(), &token);
@@ -209,8 +238,10 @@ void WebView2Widget::initialize()
 										return S_OK;
 									}).Get(), &token);
 							guard->updateBounds();
+							guard->queueBoundsUpdate();
 							controller->put_IsVisible(guard->isVisible());
-							const HRESULT navigate = state.webview->Navigate(L"https://obs-ui.local/index.html");
+							const auto url = (QStringLiteral("https://obs-ui.local/") + state.document).toStdWString();
+							const HRESULT navigate = state.webview->Navigate(url.c_str());
 							if (FAILED(navigate))
 								guard->reportFailure(QStringLiteral("Cannot navigate to local WebView2 interface"), navigate);
 							return S_OK;
@@ -233,26 +264,115 @@ void WebView2Widget::postMessage(const QJsonObject &message)
 		reportFailure(QStringLiteral("Cannot deliver WebView2 message"), result);
 }
 
+void WebView2Widget::capturePreview(QString path, std::function<void(bool)> done)
+{
+	// Complete outside the COM callback: the caller may close/delete this widget.
+	auto completion = std::make_shared<std::function<void(bool)>>(std::move(done));
+	auto destroyedConnection = std::make_shared<QMetaObject::Connection>();
+	auto finish = [completion, destroyedConnection](bool ok) {
+		QObject::disconnect(*destroyedConnection);
+		auto callback = std::move(*completion);
+		*completion = {};
+		if (callback)
+			QTimer::singleShot(0, qApp, [callback = std::move(callback), ok] { callback(ok); });
+	};
+	*destroyedConnection = connect(this, &QObject::destroyed, qApp, [finish] { finish(false); });
+	if (!impl->loaded || !impl->webview || path.isEmpty()) {
+		finish(false);
+		return;
+	}
+	if (qEnvironmentVariableIsSet("OBS_WEBVIEW2_TRACE_GEOMETRY")) {
+		RECT client{}, controllerBounds{};
+		GetClientRect(reinterpret_cast<HWND>(winId()), &client);
+		if (impl->controller) impl->controller->get_Bounds(&controllerBounds);
+		auto rectJson = [](const QRect &rect) {
+			return QJsonObject{{"x", rect.x()}, {"y", rect.y()}, {"width", rect.width()}, {"height", rect.height()}};
+		};
+		const QJsonObject geometry{{"document", impl->document}, {"widget", rectJson(this->geometry())},
+			{"parent", rectJson(parentWidget() ? parentWidget()->rect() : QRect())}, {"dpr", devicePixelRatioF()},
+			{"visible", isVisible()}, {"hidden", isHidden()}, {"mask", rectJson(mask().boundingRect())},
+			{"hwnd", rectJson(QRect(client.left, client.top, client.right-client.left, client.bottom-client.top))},
+			{"controller", rectJson(QRect(controllerBounds.left, controllerBounds.top,
+				controllerBounds.right-controllerBounds.left, controllerBounds.bottom-controllerBounds.top))}};
+		QSaveFile trace(path + QStringLiteral(".geometry.json"));
+		if (trace.open(QIODevice::WriteOnly)) {
+			trace.write(QJsonDocument(geometry).toJson());
+			trace.commit();
+		}
+	}
+	ComPtr<IStream> stream;
+	if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream))) {
+		finish(false);
+		return;
+	}
+	QPointer<WebView2Widget> guard(this);
+	const HRESULT started = impl->webview->CapturePreview(
+		COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream.Get(),
+		Callback<ICoreWebView2CapturePreviewCompletedHandler>(
+			[guard, stream, path = std::move(path), finish](HRESULT result) -> HRESULT {
+				if (!guard || FAILED(result)) {
+					finish(false);
+					return S_OK;
+				}
+				STATSTG stat{};
+				LARGE_INTEGER start{};
+				constexpr ULONGLONG maximumBytes = 64ULL * 1024 * 1024;
+				if (FAILED(stream->Stat(&stat, STATFLAG_NONAME)) || !stat.cbSize.QuadPart ||
+				    stat.cbSize.QuadPart > maximumBytes || FAILED(stream->Seek(start, STREAM_SEEK_SET, nullptr))) {
+					finish(false);
+					return S_OK;
+				}
+				QByteArray png(static_cast<qsizetype>(stat.cbSize.QuadPart), Qt::Uninitialized);
+				ULONG read = 0;
+				if (FAILED(stream->Read(png.data(), static_cast<ULONG>(png.size()), &read)) || read != png.size()) {
+					finish(false);
+					return S_OK;
+				}
+				QSaveFile file(path);
+				const bool saved = file.open(QIODevice::WriteOnly) && file.write(png) == png.size() && file.commit();
+				finish(saved);
+				return S_OK;
+			}).Get());
+	if (FAILED(started))
+		finish(false);
+}
+
 void WebView2Widget::updateBounds()
 {
 	if (!impl->controller)
 		return;
 	RECT bounds{};
-	GetClientRect(reinterpret_cast<HWND>(winId()), &bounds);
+	if (!GetClientRect(reinterpret_cast<HWND>(winId()), &bounds))
+		return;
 	impl->controller->put_Bounds(bounds);
 	impl->controller->NotifyParentWindowPositionChanged();
+}
+
+void WebView2Widget::queueBoundsUpdate()
+{
+	if (impl->boundsUpdatePending)
+		return;
+	impl->boundsUpdatePending = true;
+	// A hidden native child can still have its initial 100x30 HWND during
+	// Qt show/resize callbacks. Read physical bounds again after Qt applies them.
+	QTimer::singleShot(0, this, [this] {
+		impl->boundsUpdatePending = false;
+		updateBounds();
+	});
 }
 
 void WebView2Widget::resizeEvent(QResizeEvent *event)
 {
 	QWidget::resizeEvent(event);
 	updateBounds();
+	queueBoundsUpdate();
 }
 
 void WebView2Widget::showEvent(QShowEvent *event)
 {
 	QWidget::showEvent(event);
 	updateBounds();
+	queueBoundsUpdate();
 	if (impl->controller)
 		impl->controller->put_IsVisible(TRUE);
 }
@@ -274,8 +394,11 @@ void WebView2Widget::focusInEvent(QFocusEvent *event)
 bool WebView2Widget::event(QEvent *event)
 {
 	const bool result = QWidget::event(event);
-	if (impl && impl->controller && (event->type() == QEvent::Move || event->type() == QEvent::ScreenChangeInternal))
+	if (impl && impl->controller && (event->type() == QEvent::Move || event->type() == QEvent::ScreenChangeInternal ||
+				       event->type() == QEvent::DevicePixelRatioChange)) {
 		updateBounds();
+		queueBoundsUpdate();
+	}
 	return result;
 }
 

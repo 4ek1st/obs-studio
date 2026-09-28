@@ -312,6 +312,8 @@ public:
 	void UpdateTitleBar();
 
 	static OBSBasic *Get();
+	QWidget *FrontendWindow() const;
+	bool IsFrontendVisible() const;
 
 	void SetDisplayAffinity(QWindow *window);
 

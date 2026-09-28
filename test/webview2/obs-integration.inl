@@ -6,6 +6,8 @@ void runIntegrationChecks()
 		QTimer::singleShot(2000, this, &QWidget::close);
 		return;
 	}
+	// A previous portable test saves its enlarged window geometry.
+	resize(1280, 840);
 	struct Fixture {
 		OBSSceneAutoRelease first{obs_scene_create("WebView2 integration A")};
 		OBSSceneAutoRelease second{obs_scene_create("WebView2 integration B")};
@@ -43,6 +45,15 @@ void runIntegrationChecks()
 		for (const auto &value : snapshot().value("controls").toArray())
 			allLabels &= !value.toObject().value("text").toString().trimmed().isEmpty();
 		check(allLabels, "All native controls including icon buttons have visible labels");
+		const auto workspace = snapshot();
+		check(workspace.value("sceneToolbar").toArray().size() >= 4,
+		      "Scene creation and editing toolbar is exposed to WebView2");
+		check(workspace.value("sourceToolbar").toArray().size() >= 4,
+		      "Source creation and editing toolbar is exposed to WebView2");
+		check(workspace.value("transitions").toArray().size() >= 2,
+		      "Built-in scene transitions are exposed to WebView2");
+		check(workspace.value("nativeEditor").toBool(),
+		      "WebView2 uses the actual editable OBS preview surface");
 		if (!tree)
 			return;
 		tree->selectionModel()->clearSelection();
@@ -140,12 +151,22 @@ void runIntegrationChecks()
 				check(isVisible(), "Declining native shutdown keeps the WebView2 window usable");
 				main->removeEventFilter(blocker);
 				delete blocker;
+				RunAudioMixerIntegrationChecks(main, check);
+				runWorkspaceChecks(check, [this, fixture, check] {
+				RunDialogWorkflowChecks(static_cast<OBSBasic *>(main), check, [this, fixture, check] {
+				RunOutputWorkflowChecks(static_cast<OBSBasic *>(main), check, [this, fixture, check] {
+				obs_sceneitem_set_visible(fixture->itemA, false);
+				obs_sceneitem_set_locked(fixture->itemA, true);
+				savePersistenceFixture(check);
 				BPtr<char> path = GetAppConfigPathPtr("obs-studio/webview2-integration.json");
 				QFile report(QString::fromUtf8(path.Get()));
 				if (report.open(QIODevice::WriteOnly))
 					report.write(QJsonDocument(QJsonObject{{"checks", fixture->checks}}).toJson());
 				config_set_bool(obs_frontend_get_user_config(), "General", "ConfirmOnExit", false);
 				QTimer::singleShot(0, this, &QWidget::close);
+				});
+				});
+				});
 			});
 		});
 	});

@@ -100,7 +100,8 @@ void OBSBasic::YoutubeStreamCheck(const std::string &key)
 void OBSBasic::ShowYouTubeAutoStartWarning()
 {
 	auto msgBox = []() {
-		QMessageBox msgbox(App()->GetMainWindow());
+		auto *main = OBSBasic::Get();
+		QMessageBox msgbox(main ? main->FrontendWindow() : nullptr);
 		msgbox.setWindowTitle(QTStr("YouTube.Actions.AutoStartStreamingWarning.Title"));
 		msgbox.setText(QTStr("YouTube.Actions.AutoStartStreamingWarning"));
 		msgbox.setIcon(QMessageBox::Icon::Information);
@@ -145,7 +146,7 @@ void OBSBasic::BroadcastButtonClicked()
 							     .arg(last_error, ytAuth->GetBroadcastId());
 				}
 
-				OBSMessageBox::warning(this, QTStr("Output.BroadcastStartFailed"), last_error, true);
+				OBSMessageBox::warning(FrontendWindow(), QTStr("Output.BroadcastStartFailed"), last_error, true);
 				return;
 			}
 		}
@@ -157,9 +158,9 @@ void OBSBasic::BroadcastButtonClicked()
 	} else if (!autoStopBroadcast) {
 #ifdef YOUTUBE_ENABLED
 		bool confirm = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStoppingStream");
-		if (confirm && isVisible()) {
+		if (confirm && IsFrontendVisible()) {
 			QMessageBox::StandardButton button = OBSMessageBox::question(
-				this, QTStr("ConfirmStop.Title"), QTStr("YouTube.Actions.AutoStopStreamingWarning"),
+				FrontendWindow(), QTStr("ConfirmStop.Title"), QTStr("YouTube.Actions.AutoStopStreamingWarning"),
 				QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 
 			if (button == QMessageBox::No) {
@@ -179,7 +180,7 @@ void OBSBasic::BroadcastButtonClicked()
 							     .arg(last_error, ytAuth->GetBroadcastId());
 				}
 
-				OBSMessageBox::warning(this, QTStr("Output.BroadcastStopFailed"), last_error, true);
+				OBSMessageBox::warning(FrontendWindow(), QTStr("Output.BroadcastStopFailed"), last_error, true);
 			}
 		}
 #endif

@@ -8,7 +8,7 @@ add_executable(bridge-test bridge-test.cpp ../../frontend/webview2/BridgeProtoco
 target_link_libraries(bridge-test PRIVATE Qt6::Core)
 target_include_directories(bridge-test PRIVATE ../../frontend/webview2)
 add_test(NAME bridge-protocol COMMAND bridge-test)
-add_executable(host-test host-test.cpp ../../frontend/webview2/WebView2Widget.cpp ../../frontend/webview2/WebView2Widget.hpp ../../frontend/webview2/BridgeProtocol.cpp)
+add_executable(host-test host-test.cpp ../../frontend/webview2/WebView2Widget.cpp ../../frontend/webview2/WebView2Widget.hpp ../../frontend/webview2/BridgeProtocol.cpp ../../frontend/webview2/ExternalDrop.cpp)
 target_link_libraries(host-test PRIVATE Qt6::Widgets)
 target_include_directories(host-test PRIVATE ../../frontend/webview2)
 add_test(NAME native-host COMMAND host-test "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
@@ -21,3 +21,11 @@ add_executable(ui-geometry-test ui-geometry-test.cpp ../../frontend/webview2/UiG
 target_link_libraries(ui-geometry-test PRIVATE Qt6::Core)
 target_include_directories(ui-geometry-test PRIVATE ../../frontend/webview2)
 add_test(NAME ui-geometry COMMAND ui-geometry-test)
+
+add_executable(dialog-bridge-test dialog-bridge-test.cpp ../../frontend/webview2/QtDialogBridge.cpp ../../frontend/webview2/QtDialogBridge.hpp
+  ../../frontend/webview2/WebView2Widget.cpp ../../frontend/webview2/WebView2Widget.hpp ../../frontend/webview2/BridgeProtocol.cpp ../../frontend/webview2/ExternalDrop.cpp
+  ../../frontend/components/AbsoluteSlider.cpp ../../shared/qt/slider-ignorewheel/slider-ignorewheel.cpp)
+target_link_libraries(dialog-bridge-test PRIVATE Qt6::Widgets OBS::WebView2)
+target_include_directories(dialog-bridge-test PRIVATE ../../frontend/webview2 ../../frontend/components ../../shared/qt/slider-ignorewheel)
+target_compile_definitions(dialog-bridge-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+add_test(NAME native-dialog-bridge COMMAND dialog-bridge-test)

@@ -3,27 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>OBS — WebView2</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>OBS Studio</title>
   <link rel="stylesheet" href="style.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header><nav id="menus" aria-label="Меню OBS"></nav><button id="original" class="subtle">Основное окно OBS</button></header>
-  <div id="error" role="alert" hidden></div>
+  <header><nav id="menus" aria-label="Меню OBS"></nav><button id="original" class="subtle" title="Открыть штатное окно для проверки совместимости">Основное окно OBS</button></header>
+  <div id="error" role="alert" hidden><span></span><button aria-label="Закрыть уведомление">×</button></div>
   <main>
-    <section class="preview-area" aria-label="Предпросмотр сцены">
-      <div class="preview-title"><span id="scene-title">OBS Studio</span><span id="studio-mode"></span></div>
-      <div id="preview"></div>
+    <section class="preview-area" aria-label="Предпросмотр и программа">
+      <div class="preview-column"><div class="preview-title"><span id="scene-title">OBS Studio</span><span id="preview-mode"></span></div><div id="preview" class="canvas"></div></div>
+      <div id="studio-controls" hidden><button id="studio-transition">Переход</button><div id="quick-transitions"></div><label for="tbar">Ручной переход</label><input id="tbar" type="range" min="0" max="1023" value="0" aria-label="Ручной переход"><button id="studio-config" class="subtle">Настройки переходов</button></div>
+      <div id="program-column" class="preview-column" hidden><div class="preview-title"><span>Программа</span><span id="program-title"></span></div><div id="program" class="canvas"></div></div>
     </section>
-    <div class="panels">
-      <section class="panel"><h2 id="scenes-title">Сцены</h2><div id="scenes" class="rows" role="listbox" aria-labelledby="scenes-title"></div></section>
-      <section class="panel"><h2 id="sources-title">Источники</h2><div id="sources" class="rows" role="listbox" aria-labelledby="sources-title"></div>
-        <div class="toolbar"><button id="properties" disabled>Свойства</button><button id="filters" disabled>Фильтры</button></div>
-      </section>
-      <section class="panel controls-panel"><h2 id="controls-title">Управление</h2><div id="controls"></div></section>
+    <div id="context-bar"><span id="selected-name">Источник не выбран</span><button id="properties" disabled>Свойства</button><button id="filters" disabled>Фильтры</button><button id="source-tools" hidden>Инструменты источника</button><button id="interact" hidden>Взаимодействовать</button><span class="spacer"></span><button id="zoom-out" class="icon-button" title="Уменьшить">−</button><select id="preview-scaling" aria-label="Масштаб предпросмотра"><option value="actionScaleWindow">По размеру окна</option><option value="actionScaleCanvas">Масштаб холста</option><option value="actionScaleOutput">Масштаб вывода</option></select><button id="zoom-in" class="icon-button" title="Увеличить">+</button></div>
+    <div id="panel-resizer" role="separator" aria-label="Высота панелей" tabindex="0" aria-orientation="horizontal"></div>
+    <div class="panels" id="panels">
+      <section class="panel" data-panel="scenesDock"><h2 id="scenes-title">Сцены</h2><div id="scenes" class="rows" role="listbox" aria-labelledby="scenes-title"></div><div id="scene-toolbar" class="toolbar" role="toolbar" aria-label="Инструменты сцен"></div></section>
+      <section class="panel" data-panel="sourcesDock"><h2 id="sources-title">Источники</h2><div id="sources" class="rows" role="listbox" aria-multiselectable="true" aria-labelledby="sources-title"></div><div id="source-toolbar" class="toolbar" role="toolbar" aria-label="Инструменты источников"></div></section>
+      <section class="panel" data-panel="mixerDock"><h2 id="mixer-title">Микшер аудио</h2><div id="mixer"></div><div class="toolbar"><button id="advanced-audio" title="Расширенные свойства аудио">⚙</button><button id="mixer-menu" title="Настройки микшера">⋮</button><span class="toolbar-caption">Аудио</span></div></section>
+      <section class="panel" data-panel="transitionsDock"><h2 id="transitions-title">Переходы между сценами</h2><div class="transition-settings"><select id="transition-type" aria-label="Переход между сценами"></select><label id="transition-duration-label">Длительность <span><input id="transition-duration" type="number" min="50" max="20000" step="50" value="300" aria-label="Длительность перехода"> мс</span></label><div id="transition-toolbar" class="toolbar"></div></div></section>
+      <section class="panel controls-panel" data-panel="controlsDock"><h2 id="controls-title">Управление</h2><div id="controls"></div></section>
     </div>
   </main>
-  <footer><span id="connection" role="status">Подключение к OBS…</span><span id="status"></span></footer>
+  <div id="context-menu" class="context-menu" hidden></div>
+  <dialog id="rename-dialog"><form method="dialog"><h2 id="rename-title">Переименовать</h2><input id="rename-value" maxlength="170" required autocomplete="off"><div class="dialog-buttons"><button value="cancel" formnovalidate>Отмена</button><button value="ok" class="primary">ОК</button></div></form></dialog>
+  <footer><span id="connection" role="status">Подключение к OBS…</span><span id="output-status"></span><span id="status"></span></footer>
 </body>
 </html>
