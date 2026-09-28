@@ -64,6 +64,6 @@ Files: OBSWebView2.cpp, ui/index.html/app.js/style.css, associated focused helpe
 - [x] Compare available installed OBS plugin/tool inventory with the fork and record version/OAuth/custom-surface limits.
 - [x] Run native tests, meaningful GUI integration workflows and a local recording check; no external streaming or publishing.
 - [x] Request an independent whole-change review and fix important findings.
-- [ ] Preserve test fixtures separately, launch a normal build, verify personal data hashes, commit and push the public branch.
+- [x] Preserve test fixtures separately, launch a normal build, verify personal data hashes, commit and push the public branch.
 
 Completion requires a coverage report naming every remaining gap. A partial result must not be described as complete parity.
