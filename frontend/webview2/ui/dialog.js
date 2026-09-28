@@ -72,7 +72,9 @@ function applyDecoration(control, data) {
   const decoration = safeIcon(data.decoration);
   control.style.backgroundColor = decoration ? "transparent" : data.background || "transparent";
   control.style.backgroundImage = decoration ? `url("${decoration}")` : "none";
-  control.style.backgroundSize = "100% 100%";
+  const region = data.decorationRect;
+  control.style.backgroundPosition = region ? `${region.x}px ${region.y}px` : "0 0";
+  control.style.backgroundSize = region ? `${region.width}px ${region.height}px` : "100% 100%";
   control.style.backgroundRepeat = "no-repeat";
   // QFrame::frameWidth includes QSS padding/margins, not just the painted edge.
   control.style.border = "none";

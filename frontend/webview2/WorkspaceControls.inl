@@ -106,6 +106,121 @@ bool isWebDock(QDockWidget *dock) const
 
 QString webDockAssets, webDockProfile;
 QHash<QDockWidget *, QPointer<WebView2Widget>> webDockViews;
+bool restoringWebDocks = false;
+
+// QDockWidget owns all movement, resizing, drop targets, splits and tabs.
+// A custom Qt title bar suppresses the operating-system caption on a floating
+// dock. Ignored mouse events still reach QDockWidget's original drag handler.
+class WebDockTitleBar final : public QWidget {
+    QPointer<QDockWidget> dock;
+    QLabel *title;
+    QToolButton *toggle;
+    QToolButton *close;
+    QString dockText, floatText;
+
+    void updateControls()
+    {
+        if (!dock) return;
+        title->setText(dock->windowTitle());
+        const bool floating = dock->isFloating();
+        toggle->setText(floating ? dockText : floatText);
+        toggle->setToolTip(toggle->text());
+        toggle->setAccessibleName(toggle->text());
+        toggle->setToolButtonStyle(floating ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
+        toggle->setIcon(style()->standardIcon(QStyle::SP_TitleBarNormalButton));
+        toggle->setEnabled(dock->features().testFlag(QDockWidget::DockWidgetFloatable));
+        close->setVisible(dock->features().testFlag(QDockWidget::DockWidgetClosable));
+        updateGeometry();
+        update();
+    }
+protected:
+    void mousePressEvent(QMouseEvent *event) override { event->ignore(); }
+    void mouseMoveEvent(QMouseEvent *event) override { event->ignore(); }
+    void mouseReleaseEvent(QMouseEvent *event) override { event->ignore(); }
+    void mouseDoubleClickEvent(QMouseEvent *event) override { event->ignore(); }
+    void paintEvent(QPaintEvent *) override
+    {
+        if (!dock) return;
+        QStyleOptionDockWidget option;
+        option.initFrom(dock);
+        option.rect = rect();
+        option.movable = dock->features().testFlag(QDockWidget::DockWidgetMovable);
+        QPainter painter(this);
+        style()->drawControl(QStyle::CE_DockWidgetTitle, &option, &painter, this);
+    }
+public:
+    WebDockTitleBar(QDockWidget *parent, const QString &attachText, const QString &detachText)
+        : QWidget(parent), dock(parent), dockText(attachText), floatText(detachText)
+    {
+        setObjectName(QStringLiteral("obsWebView2DockTitleBar"));
+        auto *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(6, 1, 2, 1);
+        layout->setSpacing(2);
+        title = new QLabel(this);
+        title->setAttribute(Qt::WA_TransparentForMouseEvents);
+        title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        layout->addWidget(title, 1);
+        toggle = new QToolButton(this);
+        toggle->setObjectName(QStringLiteral("obsWebView2DockToggle"));
+        toggle->setAutoRaise(true);
+        layout->addWidget(toggle);
+        close = new QToolButton(this);
+        close->setObjectName(QStringLiteral("obsWebView2DockClose"));
+        close->setAutoRaise(true);
+        close->setIcon(style()->standardIcon(QStyle::SP_DockWidgetCloseButton));
+        close->setToolTip(QDockWidget::tr("Close"));
+        close->setAccessibleName(close->toolTip());
+        layout->addWidget(close);
+        connect(toggle, &QToolButton::clicked, this, [this] {
+            if (!dock || !dock->features().testFlag(QDockWidget::DockWidgetFloatable)) return;
+            dock->setFloating(!dock->isFloating());
+            dock->show();
+            dock->raise();
+        });
+        connect(close, &QToolButton::clicked, this, [this] {
+            if (dock && dock->features().testFlag(QDockWidget::DockWidgetClosable)) dock->close();
+        });
+        connect(parent, &QDockWidget::topLevelChanged, this, [this] { updateControls(); });
+        connect(parent, &QDockWidget::featuresChanged, this, [this] { updateControls(); });
+        connect(parent, &QWidget::windowTitleChanged, this, [this] { updateControls(); });
+        updateControls();
+    }
+    QSize minimumSizeHint() const override
+    {
+        const auto hint = layout()->minimumSize();
+        return {hint.width() + 40, std::max(hint.height(), fontMetrics().height() + 8)};
+    }
+    QSize sizeHint() const override { return minimumSizeHint(); }
+};
+
+struct WebDockChrome {
+    QPointer<QWidget> original;
+    QPointer<WebDockTitleBar> owned;
+};
+QHash<QDockWidget *, WebDockChrome> webDockChrome;
+
+void installWebDockChrome(QDockWidget *dock)
+{
+    if (webDockChrome.contains(dock)) return;
+    const bool russian = QByteArray(App()->GetLocale()).startsWith("ru");
+    auto *title = new WebDockTitleBar(dock, russian ? QStringLiteral("Закрепить") : QDockWidget::tr("Dock"),
+        russian ? QStringLiteral("Отделить панель") : QDockWidget::tr("Float"));
+    const QPointer<QWidget> original = dock->titleBarWidget();
+    webDockChrome.insert(dock, {original, title});
+    if (original) original->hide();
+    dock->setTitleBarWidget(title);
+}
+
+void restoreWebDockChrome(QDockWidget *dock)
+{
+    if (!webDockChrome.contains(dock)) return;
+    const auto chrome = webDockChrome.take(dock);
+    if (dock->titleBarWidget() == chrome.owned) {
+        dock->setTitleBarWidget(chrome.original);
+        if (chrome.original) chrome.original->show();
+    }
+    if (chrome.owned) delete chrome.owned.data();
+}
 
 class WebDockResizeFilter final : public QObject {
     QPointer<WebView2Widget> view;
@@ -136,25 +251,31 @@ void initializeWebDocks(const QString &assets, const QString &profile)
 
 void postWorkspaceMessage(const QJsonObject &message)
 {
-    browser->postMessage(message);
+    const bool meters = message.value("event") == QStringLiteral("audio.levels");
+    if (!meters || !property("webview2NativeDocking").toBool()) browser->postMessage(message);
     // Bridge request IDs contain a random session UUID. Only the requesting
     // surface consumes replies; state and meter events reach every panel.
     for (auto surface : webDockViews)
-        if (surface && (!message.contains("event") || surface->isVisible())) surface->postMessage(message);
+        if (surface && (!message.contains("event") || surface->isVisible()) &&
+            (!meters || surface->property("webview2Dock") == QStringLiteral("mixerDock"))) surface->postMessage(message);
 }
 
 void restoreWebDocks()
 {
     // Keep original dock contents, controller objects and Qt floating state.
     // The same docks become the normal Qt panels when the native UI is shown.
+    restoringWebDocks = true;
     for (auto surface : webDockViews)
         if (surface) surface->hide();
+    for (auto *dock : webDockChrome.keys()) restoreWebDockChrome(dock);
+    restoringWebDocks = false;
 }
 
 void destroyWebDocks()
 {
     // The native dock content outlives this frontend. Release our browser hosts
     // explicitly so reopening the frontend cannot accumulate hidden controllers.
+    restoreWebDocks();
     const auto surfaces = webDockViews;
     webDockViews.clear();
     for (auto surface : surfaces)
@@ -163,8 +284,9 @@ void destroyWebDocks()
 
 void showWebDock(QDockWidget *dock)
 {
-    if (!dock || !isWebDock(dock) || !dock->isFloating() || !dock->widget() ||
-        webDockAssets.isEmpty() || !surfacesBorrowed || !isVisible()) return;
+    if (!dock || !isWebDock(dock) || !dock->widget() || restoringWebDocks ||
+        webDockAssets.isEmpty() || !surfacesBorrowed || !isVisible() ||
+        !property("webview2NativeDocking").toBool()) return;
     auto surface = webDockViews.value(dock);
     if (!surface) {
         auto *content = dock->widget();
@@ -176,8 +298,9 @@ void showWebDock(QDockWidget *dock)
         new WebDockResizeFilter(content, surface);
         connect(surface, &WebView2Widget::ready, this, [this, surface, dock = QPointer<QDockWidget>(dock)] {
             if (!surface || !dock) return;
+            surface->setProperty("webview2Ready", true);
             surface->postMessage({{"version", 1}, {"event", "workspace.panel"},
-                                  {"data", QJsonObject{{"name", dock->objectName()}}}});
+                                  {"data", QJsonObject{{"name", dock->objectName()}, {"nativeDocking", true}}}});
             surface->postMessage({{"version", 1}, {"event", "state.changed"}, {"data", snapshot()}});
             surface->raise();
         });
@@ -196,24 +319,22 @@ void showWebDock(QDockWidget *dock)
             surface->postMessage({{"version", 1}, {"id", id}, {"ok", true}, {"result", QJsonObject{{"accepted", true}}}});
             OBSWeb::DispatchExternalDrop(main, drop);
         });
-        connect(surface, &WebView2Widget::failed, this, [surface, dock = QPointer<QDockWidget>(dock)](const QString &error) {
+        connect(surface, &WebView2Widget::failed, this, [this, surface, dock = QPointer<QDockWidget>(dock)](const QString &error) {
             if (surface) { surface->setProperty("webview2Failed", true); surface->hide(); }
-            if (dock) dock->setToolTip(error);
+            if (dock) { restoreWebDockChrome(dock); dock->setToolTip(error); }
             blog(LOG_ERROR, "[WebView2] Floating panel failed: %s", error.toUtf8().constData());
         });
     }
     surface->setGeometry(dock->widget()->rect());
     if (surface->property("webview2Failed").toBool()) return;
+    installWebDockChrome(dock);
     surface->show();
     surface->raise();
-    dock->show();
 }
 
 void showNativeDock(QDockWidget *dock)
 {
-    // Plugin widgets retain their original QWidget, ownership and frontend API.
-    // A floating dock is visible even while the native workspace is hidden.
-    dock->setFloating(true);
+    // Plugin widgets retain their original dock area, tabs and ownership.
     dock->show();
     dock->raise();
     dock->activateWindow();
@@ -221,19 +342,24 @@ void showNativeDock(QDockWidget *dock)
 
 void routeDocks()
 {
+    if (restoringWebDocks) return;
     for (auto *dock : main->findChildren<QDockWidget *>()) {
         if (routedDocks.contains(dock)) continue;
         routedDocks.insert(dock);
         connect(dock, &QObject::destroyed, this, [this, dock] {
             routedDocks.remove(dock);
             webDockViews.remove(dock);
+            webDockChrome.remove(dock);
         });
         connect(dock, &QDockWidget::topLevelChanged, this,
-                [this, dock = QPointer<QDockWidget>(dock)](bool floating) {
+                [this, dock = QPointer<QDockWidget>(dock)](bool) {
             if (!dock || !isWebDock(dock)) return;
-            if (floating) showWebDock(dock);
-            else if (auto surface = webDockViews.value(dock)) surface->hide();
+            showWebDock(dock);
             QTimer::singleShot(0, this, [this] { publishState(true); });
+        });
+        connect(dock, &QDockWidget::visibilityChanged, this,
+                [this, dock = QPointer<QDockWidget>(dock)](bool visible) {
+            if (dock && visible && isWebDock(dock)) showWebDock(dock);
         });
         connect(dock->toggleViewAction(), &QAction::triggered, this,
                 [this, dock = QPointer<QDockWidget>(dock)](bool visible) {
@@ -243,11 +369,10 @@ void routeDocks()
             }
             publishState(true);
         });
-        if (isVisible() && main->isHidden() && !dock->isHidden() && !isWebDock(dock)) showNativeDock(dock);
     }
     if (surfacesBorrowed && isVisible())
         for (auto *dock : main->findChildren<QDockWidget *>())
-            if (isWebDock(dock) && dock->isFloating() && !dock->isHidden()) showWebDock(dock);
+            if (isWebDock(dock) && !dock->isHidden()) showWebDock(dock);
 }
 
 void addWorkspaceState(QJsonObject &state)
@@ -298,7 +423,7 @@ void addWorkspaceState(QJsonObject &state)
         }
     }
     for (auto *button : main->findChildren<QAbstractButton *>()) {
-        if (button->property("id").toInt() > 0 && button->isVisibleTo(main))
+        if (button->property("id").toInt() > 0 && button->isVisibleTo(nativeCentral ? nativeCentral.data() : main))
             quick.append(QJsonObject{{"id", registerButton(button)}, {"text", button->text()},
                                      {"enabled", button->isEnabled()}});
     }
@@ -342,6 +467,7 @@ void addWorkspaceState(QJsonObject &state)
     }
     state.insert("mixerToolbar", mixerToolbar);
     QJsonObject preferences;
+    preferences.insert("nativeDocking", property("webview2NativeDocking").toBool());
     for (const auto *name : {"toggleListboxToolbars", "toggleContextBar", "toggleSourceIcons", "toggleStatusBar",
                              "actionSceneGridMode", "lockDocks"})
         if (auto *action = main->findChild<QAction *>(QLatin1String(name)))
@@ -391,9 +517,9 @@ bool executeWorkspace(const QJsonObject &message)
             dock->raise();
             dock->activateWindow();
         } else if (!floating) {
-            if (auto surface = webDockViews.value(dock)) surface->hide();
             dock->setFloating(false);
             dock->show();
+            showWebDock(dock);
         }
         reply(id, QJsonObject{{"name", dock->objectName()}, {"floating", dock->isFloating()}});
         publishState(true);

@@ -52,4 +52,9 @@ render({ width: 1280, height: 840, nodes: [{ id: "panel", type: "panel", enabled
 const panel = root.children.at(-1);
 assert.equal(panel.style.border, "none", "QSS layout insets do not become a solid CSS border");
 assert.match(panel.style.backgroundImage || "", /YQ==/, "native panel decoration supplies the actual thin border and rounded corners");
+render({ width: 1280, height: 840, nodes: [{ id: "panel", type: "panel", enabled: true,
+  decoration: "data:image/png;base64,YQ==", decorationRect: { x: 40, y: 140, width: 400, height: 220 },
+  rect: { x: -40, y: -140, width: 1200, height: 3600 }, clip: { x: 0, y: 0, width: 400, height: 220 } }] });
+assert.equal(panel.style.backgroundPosition, "40px 140px", "clipped decoration keeps its original widget-local origin");
+assert.equal(panel.style.backgroundSize, "400px 220px", "visible pixels are not stretched across the full scroll page");
 console.log("PASS: dialog viewport scaling, inverse wheel targeting, and resize");

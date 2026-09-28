@@ -8,8 +8,7 @@ let bridge, state, renameTarget, dragged;
 let menuSignature = "", boundsFrame = 0, connected = false;
 const boundsSignatures = new Map(), audioElements = new Map(), actionsByName = new Map();
 const defaultPanelOrder = ["scenesDock","sourcesDock","mixerDock","transitionsDock","controlsDock"];
-const defaultPanelWeights = {scenesDock:1,sourcesDock:1.13,mixerDock:1.65,transitionsDock:1.05,controlsDock:1.18};
-let panelWeights = {...defaultPanelWeights}, movingPanel, panelMode = "";
+let panelMode = "";
 const nativeCommands = new Set(["action.invoke", "control.click", "native.command", "source.visibility", "source.lock", "source.expand", "source.rename", "source.move", "scene.rename", "scene.move"]);
 const iconPaths = {
   plus:"M8 2v12M2 8h12", trash:"M3 4h10M6 2h4M4 4l1 10h6l1-10M7 6v6M9 6v6",
@@ -283,12 +282,14 @@ function renderMixer(channels) {
   $("mixer-menu").textContent=(footer.optionsText||"Параметры")+" ▾";
 }
 function updateLevels(levels) {
+  if(!rendersPanel("mixerDock"))return;
   for(const [uuid,values]of Object.entries(levels||{})){
     const entry=audioElements.get(uuid);if(!entry)continue;
     entry.meters.querySelectorAll(".meter-peak").forEach((peak,index)=>{const db=values[index]??-100;const value=Math.max(0,Math.min(1,(db+60)/60));peak.style.setProperty("--peak-empty",(100-value*100)+"%");});
   }
 }
 function renderTransitions(next) {
+  if(rendersPanel("transitionsDock")){
   const select=$("transition-type"),signature=JSON.stringify(next.transitions||[]);
   if(select.dataset.signature!==signature){select.dataset.signature=signature;select.replaceChildren(...(next.transitions||[]).map(value=>{const option=document.createElement("option");option.value=value.uuid;option.textContent=value.name;return option;}));}
   select.value=next.currentTransition||"";select.disabled=next.transitionEnabled===false;
@@ -296,6 +297,8 @@ function renderTransitions(next) {
   $("transition-duration-label").hidden=!!next.transitionFixed;
   const target=$("transition-toolbar"),buttons=next.transitionControls||[];const sig=JSON.stringify(buttons);
   if(target.dataset.signature!==sig){target.dataset.signature=sig;target.replaceChildren(...buttons.map(c=>iconButton(toolbarSymbol(c.name||c.id),c.text,()=>request("control.click",{id:c.id}),c.enabled)));}
+  }
+  if(panelMode)return;
   $("program-column").hidden=$("studio-controls").hidden=!next.studioMode;
   $("preview-mode").textContent=next.studioMode?"Предпросмотр":"";
   $("program-title").textContent=next.programName||"";
@@ -329,43 +332,36 @@ function render(next) {
   if(next.appearance?.fontSize>0)document.documentElement.style.setProperty("--ui-font-size",next.appearance.fontSize+"px");
   $("output-status").textContent=(next.statusText||[]).filter(Boolean).join("    ")||[next.streaming?"● LIVE":"○ LIVE 00:00:00",next.recording?(next.paused?"Ⅱ REC":"● REC"):"○ REC 00:00:00"].join("    ");
   $("output-status").classList.toggle("live",next.recording||next.streaming);
-  renderMenus(next.menus);indexActions(next.actions);
-  renderToolbar("scene-toolbar",next.sceneToolbar);renderToolbar("source-toolbar",next.sourceToolbar);
-  renderRows($("scenes"),next.scenes);renderRows($("sources"),next.sources,true);
+  if(!panelMode&&!next.workspace?.nativeDocking)renderMenus(next.menus);else indexActions(next.menus);
+  indexActions(next.actions);
+  if(rendersPanel("scenesDock")){renderToolbar("scene-toolbar",next.sceneToolbar);renderRows($("scenes"),next.scenes);}
+  if(rendersPanel("sourcesDock")){renderToolbar("source-toolbar",next.sourceToolbar);renderRows($("sources"),next.sources,true);}
   const selection=next.sources.filter(s=>s.selected),selected=selection.length===1?selection[0]:null;
   $("selected-name").textContent=selected?.name||(selection.length?selection.length+" источников выбрано":"Источник не выбран");
   $("properties").disabled=$("filters").disabled=!selected;$("interact").hidden=!selected?.interactive;
   $("source-tools").hidden=!next.sourceTools;
-  renderMixer(next.audio||[]);renderTransitions(next);renderControls(next.controls);
+  if(rendersPanel("mixerDock"))renderMixer(next.audio||[]);
+  if(!panelMode||panelMode==="transitionsDock")renderTransitions(next);
+  if(rendersPanel("controlsDock"))renderControls(next.controls);
   renderWorkspace(next);
   scheduleBounds();
 }
+function rendersPanel(name){return panelMode?panelMode===name:!state?.workspace?.nativeDocking;}
 function renderWorkspace(next) {
+  const preferences=next.workspace||{};
+  document.body.classList.toggle("native-docking",!!preferences.nativeDocking);
   for(const panel of $("panels").children){
     const dock=(next.docks||[]).find(item=>item.name===panel.dataset.panel);
-    panel.hidden=panelMode?panel.dataset.panel!==panelMode:!!dock&&(!dock.visible||dock.floating);
+    panel.hidden=panelMode?panel.dataset.panel!==panelMode:!!preferences.nativeDocking||!!dock&&(!dock.visible||dock.floating);
   }
-  const preferences=next.workspace||{};
   $("scene-toolbar").hidden=$("source-toolbar").hidden=preferences.toggleListboxToolbars===false;
   $("context-bar").hidden=preferences.toggleContextBar===false;
   document.querySelector("footer").hidden=preferences.toggleStatusBar===false;
   document.body.classList.toggle("no-source-icons",preferences.toggleSourceIcons===false);
   $("scenes").classList.toggle("scene-grid",!!preferences.actionSceneGridMode);
   $("mixer").classList.toggle("vertical-mixer",!!preferences.verticalMixer);
-  const panels=Array.from($("panels").children).filter(panel=>!panel.hidden);
-  $("panels").style.gridTemplateColumns=panels.map(panel=>"minmax(0,"+panelWeights[panel.dataset.panel]+"fr)").join(" ");
-  $("panels").hidden=$("panel-resizer").hidden=!panels.length;
-  for(const panel of $("panels").children){
-    const dock=(next.docks||[]).find(item=>item.name===panel.dataset.panel);
-    panel.querySelector("h2").draggable=false;
-    panel.querySelector("h2").classList.toggle("movable",!preferences.lockDocks&&!panelMode);
-    panel.querySelector(".panel-width-handle").hidden=!!panelMode||!!preferences.lockDocks||panel===panels.at(-1);
-    const toggle=panel.querySelector(".panel-float");
-    toggle.disabled=!!preferences.lockDocks||dock?.floatable===false;
-    const label=panelMode?"Вернуть панель в основное окно":"Отделить панель";
-    toggle.setAttribute("aria-label",label+": "+panel.querySelector("h2").textContent);
-    toggle.title=label;toggle.textContent=panelMode?"↙":"↗";
-  }
+  $("panels").hidden=!Array.from($("panels").children).some(panel=>!panel.hidden);
+  $("panel-resizer").hidden=true;
 }
 function scheduleBounds() {
   if(panelMode)return;
@@ -415,100 +411,29 @@ $("scenes").addEventListener("contextmenu",event=>{if(!event.target.closest(".ro
 $("sources").addEventListener("contextmenu",event=>{if(!event.target.closest(".row"))showContext(event,[actionEntry("actionAddSource"),actionEntry("actionPasteRef"),{text:"Добавить группу",callback:()=>request("native.command",{id:"source.addGroup"})}].filter(Boolean));});
 document.addEventListener("click",event=>{if(!event.target.closest(".menu,.context-menu,.audio-controls,.row"))closeMenus();});
 document.addEventListener("keydown",event=>{
-  if(event.defaultPrevented)return;
+  if(event.defaultPrevented||event.isComposing||event.getModifierState?.("AltGraph"))return;
   if(event.key==="Escape"){closeMenus();return;}
-  if(event.target.closest("input,select,textarea,dialog"))return;
+  const target=event.target;
+  const editsText=target.tagName==="TEXTAREA"||target.isContentEditable||
+    (target.tagName==="INPUT"&&!["range","checkbox","radio","button","submit","reset","image","color","file"].includes(target.type));
+  if(editsText||target.closest("dialog"))return;
   const keyNames={Delete:"del",Backspace:"backspace",Insert:"ins",PageUp:"pgup",PageDown:"pgdown"," ":"space"};
-  const keys=[event.ctrlKey?"ctrl":event.metaKey?"meta":"",event.altKey?"alt":"",event.shiftKey?"shift":"",keyNames[event.key]||event.key.toLowerCase().replace("arrow","")].filter(Boolean).join("+");
-  const action=[...actionsByName.values()].find(a=>a.enabled&&a.shortcutGlobal!==false&&(a.shortcutKey||a.shortcut)?.toLowerCase().replace(/ /g,"")===keys);
+  let key=keyNames[event.key]||event.key.toLowerCase().replace("arrow","");
+  // Windows shortcuts remain usable with a Cyrillic layout. Latin layouts
+  // retain their logical key (for example Y/Z on a German keyboard).
+  if(!/^[\x20-\x7e]+$/.test(key)&&/^Key[A-Z]$/.test(event.code))key=event.code.slice(3).toLowerCase();
+  const keys=[event.ctrlKey?"ctrl":event.metaKey?"meta":"",event.altKey?"alt":"",event.shiftKey?"shift":"",key].filter(Boolean).join("+");
+  const action=[...actionsByName.values()].find(a=>a.enabled&&a.shortcutGlobal!==false&&
+    (a.shortcutKeys||[a.shortcutKey||a.shortcut]).some(shortcut=>shortcut?.toLowerCase().replace(/ /g,"")===keys));
   if(action){event.preventDefault();request("action.invoke",{id:action.id});}
 });
-const resizer=$("panel-resizer");let sizing=false;
-function savePanelLayout(){try{localStorage.setItem("obs.panels.order",JSON.stringify(Array.from($("panels").children,p=>p.dataset.panel)));localStorage.setItem("obs.panels.weights",JSON.stringify(panelWeights));}catch{}}
-function resetPanelLayout(){panelWeights={...defaultPanelWeights};for(const id of defaultPanelOrder)$("panels").append(document.querySelector('[data-panel="'+id+'"]'));document.documentElement.style.removeProperty("--panel-height");try{localStorage.removeItem("obs.panels.height");}catch{}savePanelLayout();if(state)renderWorkspace(state);scheduleBounds();}
-try{
-  const order=JSON.parse(localStorage.getItem("obs.panels.order")||"null"),weights=JSON.parse(localStorage.getItem("obs.panels.weights")||"null");
-  if(Array.isArray(order)&&order.length===defaultPanelOrder.length&&new Set(order).size===order.length&&order.every(id=>defaultPanelOrder.includes(id)))for(const id of order)$("panels").append(document.querySelector('[data-panel="'+id+'"]'));
-  if(weights)for(const id of defaultPanelOrder)if(Number.isFinite(weights[id])&&weights[id]>=.15&&weights[id]<=10)panelWeights[id]=weights[id];
-}catch{}
-for(const panel of $("panels").children){
-  const heading=panel.querySelector("h2"),handle=document.createElement("div");handle.className="panel-width-handle";handle.tabIndex=0;handle.setAttribute("role","separator");handle.setAttribute("aria-label","Ширина панели "+heading.textContent);handle.setAttribute("aria-orientation","vertical");panel.append(handle);
-  heading.title="Перетащите по панелям для перестановки, за их пределы — в отдельное окно";
-  heading.tabIndex=0;
-  const toggleDock=(placement={})=>{const rect=panel.getBoundingClientRect();return request(panelMode?"dock.attach":"dock.detach",{name:panel.dataset.panel,width:rect.width,height:rect.height,viewportWidth:innerWidth,offsetX:placement.offsetX??36,offsetY:placement.offsetY??16});};
-  const floatButton=button("↗",()=>toggleDock());floatButton.className="panel-float";floatButton.setAttribute("aria-label","Отделить панель: "+heading.textContent);panel.append(floatButton);
-  const clearMove=()=>{
-    if(movingPanel?.heading!==heading)return;
-    movingPanel.ghost?.remove();movingPanel=null;panel.classList.remove("panel-dragging");
-    document.querySelectorAll(".panel-drop-before,.panel-drop-after").forEach(item=>item.classList.remove("panel-drop-before","panel-drop-after"));
-    scheduleBounds();
-  };
-  heading.addEventListener("pointerdown",event=>{
-    if(event.button!==0||panelMode||state?.workspace?.lockDocks)return;
-    event.preventDefault();heading.focus({preventScroll:true});
-    const rect=panel.getBoundingClientRect();
-    movingPanel={panel,heading,x:event.clientX,y:event.clientY,offsetX:event.clientX-rect.left,offsetY:event.clientY-rect.top,pointer:event.pointerId,active:false,target:null};
-    heading.setPointerCapture(event.pointerId);
-  });
-  heading.addEventListener("pointermove",event=>{
-    const move=movingPanel;if(!move||move.heading!==heading)return;
-    if(state?.workspace?.lockDocks){clearMove();return;}
-    if(!move.active&&Math.hypot(event.clientX-move.x,event.clientY-move.y)<6)return;
-    if(!move.active){
-      move.active=true;const rect=panel.getBoundingClientRect();move.ghost=panel.cloneNode(true);move.ghost.classList.add("panel-drag-ghost");
-      move.ghost.removeAttribute("data-panel");move.ghost.inert=true;move.ghost.setAttribute("aria-hidden","true");
-      for(const item of move.ghost.querySelectorAll("[id]"))item.removeAttribute("id");
-      move.ghost.querySelector(".panel-width-handle")?.remove();move.ghost.style.width=rect.width+"px";move.ghost.style.height=rect.height+"px";
-      panel.classList.add("panel-dragging");document.body.append(move.ghost);
-    }
-    move.ghost.style.left=(event.clientX-move.offsetX)+"px";move.ghost.style.top=(event.clientY-move.offsetY)+"px";
-    document.querySelectorAll(".panel-drop-before,.panel-drop-after").forEach(item=>item.classList.remove("panel-drop-before","panel-drop-after"));
-    const area=$("panels").getBoundingClientRect();
-    move.inside=event.clientX>=area.left&&event.clientX<=area.right&&event.clientY>=area.top&&event.clientY<=area.bottom;
-    move.target=null;
-    if(move.inside){
-      const candidates=Array.from($("panels").children).filter(item=>!item.hidden&&item!==panel);
-      move.target=candidates.find(item=>event.clientX<item.getBoundingClientRect().right)||candidates.at(-1);
-      if(move.target){const target=move.target.getBoundingClientRect();move.after=event.clientX>=target.left+target.width/2;move.target.classList.add(move.after?"panel-drop-after":"panel-drop-before");}
-    }
-    move.ghost.classList.toggle("detaching",!move.inside);scheduleBounds();
-  });
-  heading.addEventListener("pointerup",event=>{
-    const move=movingPanel;if(!move||move.heading!==heading)return;
-    if(move.active&&!state?.workspace?.lockDocks){
-      if(move.inside&&move.target){move.target[move.after?"after":"before"](panel);savePanelLayout();renderWorkspace(state);scheduleBounds();}
-      else if(!move.inside)toggleDock(move);
-    }
-    clearMove();
-    if(heading.hasPointerCapture(event.pointerId))heading.releasePointerCapture(event.pointerId);
-  });
-  heading.addEventListener("pointercancel",clearMove);
-  heading.addEventListener("lostpointercapture",()=>{if(movingPanel?.heading===heading)clearMove();});
-  heading.addEventListener("dblclick",()=>{if(!state?.workspace?.lockDocks)toggleDock();});
-  heading.addEventListener("keydown",event=>{
-    if(state?.workspace?.lockDocks)return;
-    if(event.key==="Escape"){clearMove();return;}
-    if(event.key==="Enter"){event.preventDefault();toggleDock();return;}
-    if(panelMode||!["ArrowLeft","ArrowRight"].includes(event.key))return;
-    event.preventDefault();const list=Array.from($("panels").children).filter(item=>!item.hidden),index=list.indexOf(panel),target=list[index+(event.key==="ArrowLeft"?-1:1)];
-    if(target){target[event.key==="ArrowLeft"?"before":"after"](panel);savePanelLayout();renderWorkspace(state);scheduleBounds();}
-  });
-  heading.addEventListener("contextmenu",event=>{const dock=state?.docks?.find(d=>d.name===panel.dataset.panel);showContext(event,[{text:panelMode?"Вернуть панель в основное окно":"Отделить панель",enabled:!state?.workspace?.lockDocks,callback:toggleDock},...(dock?[{text:"Скрыть панель",callback:()=>request("action.invoke",{id:dock.action})}]:[]),{text:"Сбросить расположение панелей",enabled:!state?.workspace?.lockDocks,callback:resetPanelLayout}]);});
-  let resizing;
-  const resizeWidth=delta=>{if(!resizing)return;const {left,right,width,first,second}=resizing;const shift=delta/width*(first+second),a=Math.max(.15,Math.min(first+second-.15,first+shift));panelWeights[left]=a;panelWeights[right]=first+second-a;renderWorkspace(state);};
-  handle.addEventListener("pointerdown",event=>{if(event.button!==0||panelMode||state?.workspace?.lockDocks)return;const next=Array.from($("panels").children).slice(Array.from($("panels").children).indexOf(panel)+1).find(p=>!p.hidden);if(!next)return;resizing={left:panel.dataset.panel,right:next.dataset.panel,x:event.clientX,width:panel.offsetWidth+next.offsetWidth,first:panelWeights[panel.dataset.panel],second:panelWeights[next.dataset.panel]};handle.setPointerCapture(event.pointerId);});
-  handle.addEventListener("pointermove",event=>resizeWidth(event.clientX-(resizing?.x||event.clientX)));
-  handle.addEventListener("pointerup",()=>{resizing=null;savePanelLayout();});
-  handle.addEventListener("keydown",event=>{if(!["ArrowLeft","ArrowRight"].includes(event.key)||state?.workspace?.lockDocks)return;event.preventDefault();const list=Array.from($("panels").children).filter(p=>!p.hidden),next=list[list.indexOf(panel)+1];if(!next)return;resizing={left:panel.dataset.panel,right:next.dataset.panel,width:panel.offsetWidth+next.offsetWidth,first:panelWeights[panel.dataset.panel],second:panelWeights[next.dataset.panel]};resizeWidth(event.key==="ArrowLeft"?-15:15);resizing=null;savePanelLayout();});
-}
-try{const saved=Number(localStorage.getItem("obs.panels.height"));if(saved>=195&&saved<=900)document.documentElement.style.setProperty("--panel-height",saved+"px");}catch{}
-resizer.addEventListener("pointerdown",event=>{sizing=true;resizer.setPointerCapture(event.pointerId);});
-resizer.addEventListener("pointermove",event=>{if(sizing){const height=Math.max(195,Math.min(innerHeight*.65,innerHeight-event.clientY-28));document.documentElement.style.setProperty("--panel-height",height+"px");scheduleBounds();}});
-resizer.addEventListener("pointerup",()=>{sizing=false;try{localStorage.setItem("obs.panels.height",String($("panels").offsetHeight));}catch{}});
-resizer.addEventListener("keydown",event=>{if(!["ArrowUp","ArrowDown"].includes(event.key))return;event.preventDefault();document.documentElement.style.setProperty("--panel-height",Math.max(195,$("panels").offsetHeight+(event.key==="ArrowUp"?10:-10))+"px");scheduleBounds();});
+// Native QMainWindow owns docking, resizing and persistence. Each dock document
+// only renders its content; its Qt title bar receives the original drag gestures.
+const resizer=$("panel-resizer");resizer.hidden=true;
+function resetPanelLayout(){if(state)renderWorkspace(state);scheduleBounds();}
 document.addEventListener("toggle",scheduleBounds,true);
 new ResizeObserver(scheduleBounds).observe($("preview"));new ResizeObserver(scheduleBounds).observe($("program"));
 window.addEventListener("resize",scheduleBounds);window.addEventListener("pagehide",()=>bridge?.dispose());
-try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",updateLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignatures.clear();scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel");if(state)renderWorkspace(state);});}
+try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",updateLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignatures.clear();scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel","native-dock-panel");if(state)renderWorkspace(state);});}
 catch(error){showError(error);$("connection").textContent="Нет соединения с OBS";}
 if(bridge)installExternalDrop(document,{onError:showError});

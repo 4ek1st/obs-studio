@@ -1,4 +1,18 @@
 // Member of OBSWebView2; only compiled for the disposable portable test build.
+void traceWorkspacePreview(const char *phase) const
+{
+    auto *display = preview->GetDisplay();
+    auto *handle = preview->windowHandle();
+    auto *parent = preview->parentWidget();
+    auto *window = preview->window();
+    const auto geometry = preview->geometry();
+    blog(LOG_INFO, "[WebView2 preview trace] %s visible=%d hidden=%d display=%p enabled=%d exposed=%d parentVisible=%d windowVisible=%d mainMinimized=%d geometry=%d,%d,%d,%d",
+        phase, preview->isVisible(), preview->isHidden(), static_cast<void *>(display),
+        display && obs_display_enabled(display), handle && handle->isExposed(),
+        parent && parent->isVisible(), window && window->isVisible(), main->isMinimized(),
+        geometry.x(), geometry.y(), geometry.width(), geometry.height());
+}
+
 void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
 {
     const QRect video = preview->geometry().translated(-browser->pos());
@@ -9,7 +23,9 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
         {"overlays", QJsonArray{QJsonObject{{"x", menu.x()}, {"y", menu.y()},
             {"width", menu.width()}, {"height", menu.height()}}}}};
     auto *display = preview->GetDisplay();
+    traceWorkspacePreview("before overlay bounds");
     execute({{"id", "overlay-live-test"}, {"command", "preview.bounds"}, {"args", bounds}});
+    traceWorkspacePreview("after overlay bounds");
     check(lastTestReply.value("ok").toBool() && preview->isVisible() && display &&
           preview->GetDisplay() == display && obs_display_enabled(display),
           "HTML menu bounds preserve the visible enabled native GPU display and its identity");
@@ -27,12 +43,20 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
     const bool wasLocked = lock->isChecked();
     const bool wasFloating = dock->isFloating();
     const bool wasHidden = dock->isHidden();
-    const bool reusingSurface = bool(webDockViews.value(dock));
+    const QByteArray originalDockLayout = main->saveState();
     const QPointer<QWidget> nativeContent = dock->widget();
+    check(property("webview2NativeDocking").toBool() && main->isVisible() && main->centralWidget() == this,
+          "The original OBS QMainWindow owns the visible workspace and native docking layout");
+    auto *scenesDock = main->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
+    check(scenesDock && !scenesDock->isFloating() && webDockViews.value(scenesDock) &&
+          webDockViews.value(scenesDock)->parentWidget() == scenesDock->widget(),
+          "An attached core panel uses its own WebView inside the original native dock content");
     lock->setChecked(false);
     if (dock->isFloating()) execute({{"id", "dock-preparation-test"}, {"command", "dock.attach"},
         {"args", QJsonObject{{"name", "controlsDock"}}}});
     lock->setChecked(true);
+    auto *toggle = dock->titleBarWidget() ? dock->titleBarWidget()->findChild<QToolButton *>(QStringLiteral("obsWebView2DockToggle")) : nullptr;
+    check(toggle && !toggle->isEnabled(), "Native dock lock disables the custom Qt float and attach control");
     execute({{"id", "dock-lock-test"}, {"command", "dock.detach"}, {"args", QJsonObject{{"name", "controlsDock"}}}});
     check(!lastTestReply.value("ok").toBool() && !dock->isFloating(),
           "Locked workspace rejects a core panel detach without changing its native dock state");
@@ -42,9 +66,12 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
     const QPointer<WebView2Widget> surface = webDockViews.value(dock);
     check(lastTestReply.value("ok").toBool() && dock->isFloating() && dock->isVisible() && surface &&
           dock->widget() == nativeContent, "Detaching Controls creates a WebView while preserving its native controller widget");
+    check(dock->titleBarWidget() && dock->titleBarWidget()->objectName() == QStringLiteral("obsWebView2DockTitleBar") &&
+          dock->windowFlags().testFlag(Qt::FramelessWindowHint),
+          "A floating WebView dock has one native Qt drag title bar and no duplicate OS caption");
     auto completed = std::make_shared<bool>(false);
     auto finish = [this, dock = QPointer<QDockWidget>(dock), lock = QPointer<QAction>(lock),
-                   wasLocked, wasFloating, wasHidden, completed, done] {
+                   wasLocked, wasFloating, wasHidden, originalDockLayout, completed, done] {
         if (*completed) return;
         *completed = true;
         if (lock) lock->setChecked(false);
@@ -54,6 +81,7 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
             if (wasHidden) dock->hide();
         }
         if (lock) lock->setChecked(wasLocked);
+        main->restoreState(originalDockLayout);
         browser->postMessage({{"version", 1}, {"event", "viewport.invalidate"}, {"data", QJsonObject{}}});
         done();
     };
@@ -102,15 +130,77 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
                 check(lastTestReply.value("ok").toBool() && obs_frontend_preview_program_mode_active() != studio,
                       "Floating Controls command route executes the original Studio Mode button");
                 obs_frontend_set_preview_program_mode(studio);
+                traceWorkspacePreview("floating controls before native restore");
                 restoreSurfaces();
-                check(surface->isHidden() && dock->widget() == nativeContent,
-                      "Returning to native UI hides the floating WebView and retains its original dock content");
+                check(surface->isHidden() && dock->widget() == nativeContent && !dock->titleBarWidget() &&
+                      !dock->windowFlags().testFlag(Qt::FramelessWindowHint),
+                      "Native fallback restores the original dock content and system caption");
                 resumeFrontend();
+                traceWorkspacePreview("floating controls after frontend resume");
                 check(surface->isVisible() && dock->isFloating(), "Resuming WebView restores the same floating panel surface");
+                // Deliver mouse gestures through the real Qt title bar. The
+                // test never moves the user's cursor or sends system input.
+                auto mouse = [](QWidget *target, QEvent::Type type, QPoint global, Qt::MouseButton button, Qt::MouseButtons buttons) {
+                    const QPointF local = target->mapFromGlobal(global);
+                    QMouseEvent event(type, local, local, QPointF(global), button, buttons, Qt::NoModifier);
+                    QApplication::sendEvent(target, &event);
+                };
+                auto *titleBar = dock->titleBarWidget();
+                if (titleBar) {
+                    QPoint grip = titleBar->mapToGlobal(QPoint(20, titleBar->height() / 2));
+                    mouse(titleBar, QEvent::MouseButtonDblClick, grip, Qt::LeftButton, Qt::LeftButton);
+                    check(!dock->isFloating() && webDockViews.value(dock) == surface,
+                          "Double clicking the Qt title bar redocks the same live WebView through the original QDockWidget handler");
+                    grip = titleBar->mapToGlobal(QPoint(20, titleBar->height() / 2));
+                    mouse(titleBar, QEvent::MouseButtonDblClick, grip, Qt::LeftButton, Qt::LeftButton);
+                    check(dock->isFloating(), "Double clicking the same Qt title bar detaches its original dock again");
+                    grip = titleBar->mapToGlobal(QPoint(20, titleBar->height() / 2));
+                    const auto beforeMove = dock->pos();
+                    mouse(titleBar, QEvent::MouseButtonPress, grip, Qt::LeftButton, Qt::LeftButton);
+                    mouse(titleBar, QEvent::MouseMove, grip + QPoint(80, 50), Qt::NoButton, Qt::LeftButton);
+                    mouse(titleBar, QEvent::MouseMove, grip + QPoint(120, 70), Qt::NoButton, Qt::LeftButton);
+                    check(dock->pos() != beforeMove, "Dragging the Qt title bar moves the actual native floating panel");
+                    const QPoint target = main->mapToGlobal(QPoint(6, main->height() / 2));
+                    mouse(titleBar, QEvent::MouseMove, target, Qt::NoButton, Qt::LeftButton);
+                    auto *indicator = main->findChild<QWidget *>(QStringLiteral("qt_rubberband"));
+                    blog(LOG_INFO, "[WebView2 dock trace] before drop target=%d,%d indicator=%d dockFloating=%d mainVisible=%d mainSize=%dx%d dockOptions=%u",
+                        target.x(), target.y(), indicator && indicator->isVisible(), dock->isFloating(), main->isVisible(),
+                        main->width(), main->height(), unsigned(main->dockOptions()));
+                    check(indicator && indicator->isVisible(),
+                          "Native QMainWindow displays its accepted drop target while the floating WebView dock is dragged");
+                    mouse(titleBar, QEvent::MouseButtonRelease, target, Qt::LeftButton, Qt::NoButton);
+                } else check(false, "Core WebView dock exposes its native Qt drag title bar");
+                // Qt's zero-duration dock animation finishes through a deferred
+                // QPropertyAnimation destruction callback. Let the event loop
+                // perform the actual native plug before observing or moving it.
+                QTimer::singleShot(100, this, [this, surface, dock, nativeContent, check, completed, finish] {
+                if (*completed) return;
+                if (!surface || !dock) { check(false, "Dock survives native drop completion"); finish(); return; }
+                blog(LOG_INFO, "[WebView2 dock trace] after drop floating=%d nativeParent=%d sameSurface=%d",
+                    dock->isFloating(), dock->parentWidget() == main, webDockViews.value(dock) == surface);
+                check(!dock->isFloating() && dock->parentWidget() == main && webDockViews.value(dock) == surface,
+                      "Dragging a floating title bar into the original QMainWindow drop area redocks its live WebView");
+                dock->setFloating(true);
                 surface->messageReceived({{"id", "floating-attach-test"}, {"command", "dock.attach"},
                     {"args", QJsonObject{{"name", "controlsDock"}}}});
-                check(lastTestReply.value("ok").toBool() && !dock->isFloating() && surface->isHidden() && dock->widget() == nativeContent,
-                      "Floating Controls route reattaches its dock without destroying controller content");
+                check(lastTestReply.value("ok").toBool() && !dock->isFloating() && !surface->isHidden() && dock->widget() == nativeContent,
+                      "Redocking keeps the same live WebView and native controller content inside the main workspace");
+                main->addDockWidget(Qt::LeftDockWidgetArea, dock);
+                check(main->dockWidgetArea(dock) == Qt::LeftDockWidgetArea && dock->widget() == nativeContent,
+                      "WebView dock can occupy the original QMainWindow left dock area");
+                auto *scenes = main->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
+                if (scenes) {
+                    main->splitDockWidget(scenes, dock, Qt::Vertical);
+                    check(main->dockWidgetArea(dock) == main->dockWidgetArea(scenes) && !dock->isFloating(),
+                          "Original QMainWindow accepts a vertical split containing the WebView dock");
+                    main->tabifyDockWidget(scenes, dock);
+                    check(main->tabifiedDockWidgets(scenes).contains(dock),
+                          "Original QMainWindow tabifies WebView docks using its native layout");
+                    const auto tabbedLayout = main->saveState();
+                    main->addDockWidget(Qt::RightDockWidgetArea, dock);
+                    check(main->restoreState(tabbedLayout) && main->tabifiedDockWidgets(scenes).contains(dock),
+                          "Native saveState and restoreState retain WebView dock tabs and placement");
+                } else check(false, "Native Scenes dock exists for split and tab checks");
                 const QPointer<QObject> resizeFilter = surface->findChild<QObject *>(QStringLiteral("obsWebView2DockResizeFilter"));
                 check(resizeFilter, "Floating resize filter belongs to its browser surface");
                 destroyWebDocks();
@@ -122,12 +212,13 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
                 check(lastTestReply.value("ok").toBool() && recreated.size() == 1 && webDockViews.value(dock) == recreated.first(),
                       "Creating a panel after frontend disposal produces exactly one fresh browser host");
                 finish();
+                });
             });
         });
     };
     connect(surface, &WebView2Widget::ready, this, loaded);
     // A restored floating panel may have completed navigation before this test.
-    if (reusingSurface) QTimer::singleShot(300, this, loaded);
+    if (surface->property("webview2Ready").toBool()) QTimer::singleShot(300, this, loaded);
 }
 
 void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
@@ -211,14 +302,18 @@ void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::func
             auto *stats = main->findChild<QDockWidget *>("statsDock");
             routeDocks();
             if (stats) {
+                const bool floating = stats->isFloating();
+                const auto dockArea = main->dockWidgetArea(stats);
                 if (stats->toggleViewAction()->isChecked()) stats->toggleViewAction()->trigger();
                 stats->toggleViewAction()->trigger();
-                check(stats->isVisible() && stats->isFloating(), "Additional native dock opens from WebView2 while the old workspace is hidden");
+                check(stats->isVisible() && stats->isFloating() == floating && main->dockWidgetArea(stats) == dockArea,
+                      "Additional native dock opens from WebView2 without changing its original dock area or floating state");
                 stats->hide();
             } else check(false, "Stats dock is available");
             const auto home = previewPlacement.parent;
             const auto homeLayout = previewPlacement.layout;
             const auto row = previewPlacement.row, column = previewPlacement.column;
+            traceWorkspacePreview("workspace before native restore");
             restoreSurfaces();
             int restoredRow = -1, restoredColumn = -1, rowSpan = 0, columnSpan = 0;
             auto *grid = qobject_cast<QGridLayout *>(homeLayout.data());
@@ -232,6 +327,7 @@ void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::func
             check(preview->geometry() == nativeGeometry && !preview->isHidden(),
                   "Late WebView2 bounds cannot move or hide a restored native preview");
             resumeFrontend();
+            traceWorkspacePreview("workspace after frontend resume");
             check(preview->parentWidget() == this && surfacesBorrowed, "Returning to WebView2 reuses the same native editing surface");
             obs_frontend_set_preview_program_mode(true);
             syncProgramSurface();
@@ -244,6 +340,7 @@ void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::func
             check(programPlacement.parent == programHome && programPlacement.layout == programLayout,
                   "Focusing an existing WebView2 window preserves the saved program display placement");
             QTimer::singleShot(300, this, [this, check, done] {
+                traceWorkspacePreview("workspace delayed studio check");
                 check(programPreview && programPreview->isVisible() && programPreview->width() > 100 && preview->width() > 100,
                       "Actual WebView2 Studio Mode lays out both native video displays");
                 OBSSceneAutoRelease quickScene{obs_scene_create("WebView quick transition destination")};
@@ -262,8 +359,44 @@ void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::func
                 const auto artifacts = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
                 if (!artifacts.isEmpty()) {
                     QDir().mkpath(artifacts);
-                    QTimer::singleShot(250, this, [this, artifacts, check, done] {
-                        browser->capturePreview(QDir(artifacts).filePath("workspace.png"), [check, done](bool saved) {
+                    const auto previousGeometry = main->geometry();
+                    const auto ownWindow = reinterpret_cast<HWND>(main->winId());
+                    const bool wasTopmost = (GetWindowLongPtrW(ownWindow, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+                    if (auto *screen = main->screen()) {
+                        const auto available = screen->availableGeometry().adjusted(8, 32, -8, -8);
+                        QRect visible(QPoint(), previousGeometry.size().boundedTo(available.size()));
+                        visible.moveCenter(available.center());
+                        main->setGeometry(visible);
+                    }
+                    main->raise();
+                    SetWindowPos(ownWindow, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    QTimer::singleShot(250, this, [this, artifacts, check, done, previousGeometry, wasTopmost] {
+                        const auto ownWindow = reinterpret_cast<HWND>(main->winId());
+                        RECT client{};
+                        bool ownsPixels = main->isVisible() && main->centralWidget() == this &&
+                            main->property("webview2NativeDocking").toBool() && GetClientRect(ownWindow, &client);
+                        for (POINT point : {POINT{8, 8}, POINT{client.right - 8, 8},
+                             POINT{8, client.bottom - 8}, POINT{client.right - 8, client.bottom - 8},
+                             POINT{client.right / 2, client.bottom / 2}}) {
+                            ClientToScreen(ownWindow, &point);
+                            const auto topWindow = WindowFromPoint(point);
+                            ownsPixels &= topWindow == ownWindow || IsChild(ownWindow, topWindow);
+                        }
+                        bool composedSaved = false;
+                        if (ownsPixels && main->screen()) {
+                            const auto origin = main->mapToGlobal(QPoint());
+                            composedSaved = main->screen()->grabWindow(0, origin.x(), origin.y(), main->width(), main->height())
+                                .save(QDir(artifacts).filePath("workspace-composed.png"));
+                        }
+                        check(ownsPixels && composedSaved,
+                              "Owned QA main window composed pixels include the native dock layout and GPU preview");
+                        browser->capturePreview(QDir(artifacts).filePath("workspace.png"),
+                            [main = QPointer<QMainWindow>(main), previousGeometry, wasTopmost, check, done](bool saved) {
+                            if (main) {
+                                SetWindowPos(reinterpret_cast<HWND>(main->winId()), wasTopmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+                                    0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                                main->setGeometry(previousGeometry);
+                            }
                             check(saved, "Actual main WebView2 interface rendering is captured successfully");
                             done();
                         });

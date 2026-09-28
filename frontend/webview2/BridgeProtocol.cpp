@@ -8,7 +8,7 @@ namespace OBSWeb {
 bool IsLocalUi(const QUrl &url)
 {
 	return url.isValid() && url.scheme() == QStringLiteral("https") &&
-	       url.host() == QStringLiteral("obs-ui.local") && url.port(443) == 443 &&
+	       url.host() == QLatin1String(LocalUiHost) && url.port(443) == 443 &&
 	       url.userInfo().isEmpty();
 }
 

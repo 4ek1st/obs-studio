@@ -72,7 +72,7 @@ void OBSBasic::ClearContextBar()
 
 void OBSBasic::UpdateContextBarVisibility()
 {
-	int width = ui->centralwidget->size().width();
+	int width = centralWidget()->width();
 
 	ContextBarSize contextBarSizeNew;
 	if (width >= 740) {

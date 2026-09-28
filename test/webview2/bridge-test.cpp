@@ -15,7 +15,7 @@ int main(int argc, char **argv)
 			++failures;
 		}
 	};
-	const QString local = QStringLiteral("https://obs-ui.local/index.html");
+	const QString local = QStringLiteral("https://obs-ui.example/index.html");
 	const QByteArray valid = R"({"version":1,"id":"17","command":"state.get","args":{}})";
 	QString error;
 	const auto accepted = OBSWeb::ParseRequest(local, valid, error);
@@ -25,9 +25,9 @@ int main(int argc, char **argv)
 		check(accepted->command == "state.get", "command survives parsing");
 	}
 	check(OBSWeb::IsLocalUi(QUrl(local)), "local document origin is accepted");
-	for (const auto *url : {"https://example.com/", "https://obs-ui.local.evil/index.html",
-				"http://obs-ui.local/", "file:///index.html", "https://user@obs-ui.local/",
-				"https://obs-ui.local:8443/", "data:text/html,hello"}) {
+	for (const auto *url : {"https://example.com/", "https://obs-ui.example.evil/index.html",
+				"http://obs-ui.example/", "file:///index.html", "https://user@obs-ui.example/",
+				"https://obs-ui.example:8443/", "https://obs-ui.local/", "data:text/html,hello"}) {
 		check(!OBSWeb::ParseRequest(QString::fromLatin1(url), valid, error), "untrusted origin is rejected");
 	}
 	for (const auto *body : {"{", "[]", "{}",

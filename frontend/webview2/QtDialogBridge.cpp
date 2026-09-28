@@ -10,11 +10,15 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QContextMenuEvent>
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QDialog>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QDynamicPropertyChangeEvent>
+#include <QElapsedTimer>
 #include <QFileDialog>
+#include <QFile>
 #include <QFocusEvent>
 #include <QFontDialog>
 #include <QFontInfo>
@@ -190,25 +194,31 @@ struct QtDialogBridge::Impl {
 	QHash<QString, QPersistentModelIndex> indexes;
 	QHash<QPersistentModelIndex, QString> indexIds;
 	QHash<qint64, QString> icons;
-	struct Raster { QImage pixels; QString uri; };
+	struct Raster { QSize size; qreal dpr; QByteArray fingerprint; QString uri; };
 	// Compare freshly styled pixels, then reuse PNG encoding. This also catches
 	// inherited QSS and dynamic-property changes without guessing a style cache key.
+	// Keep fingerprints rather than raw bitmaps: several nested Settings panels
+	// otherwise exhaust the cache and re-encode every image on every poll.
 	QCache<QString, Raster> rasters{8 * 1024 * 1024};
 
-	template<typename Paint> QString raster(QWidget *widget, const QString &part, Paint paint)
+	template<typename Paint> QString raster(QWidget *widget, const QString &part, Paint paint, QRect paintRect = {})
 	{
+		if (paintRect.isEmpty()) paintRect = widget->rect();
 		const auto dpr = widget->devicePixelRatioF();
-		QImage pixels(widget->size() * dpr, QImage::Format_ARGB32_Premultiplied);
+		QImage pixels(paintRect.size() * dpr, QImage::Format_ARGB32_Premultiplied);
 		if (pixels.isNull()) return {};
 		pixels.setDevicePixelRatio(dpr);
 		pixels.fill(Qt::transparent);
-		{ QPainter painter(&pixels); paint(painter); }
+		{ QPainter painter(&pixels); painter.translate(-paintRect.topLeft()); paint(painter); }
+		const auto fingerprint = QCryptographicHash::hash(
+			QByteArrayView(reinterpret_cast<const char *>(pixels.constBits()), pixels.sizeInBytes()), QCryptographicHash::Sha256);
 		const auto key = identify(widget) + QLatin1Char(':') + part;
-		if (auto *cached = rasters.object(key); cached && cached->pixels == pixels) return cached->uri;
+		if (auto *cached = rasters.object(key); cached && cached->size == pixels.size() && cached->dpr == dpr &&
+		    cached->fingerprint == fingerprint) return cached->uri;
 		QByteArray bytes;
 		QBuffer buffer(&bytes); buffer.open(QIODevice::WriteOnly); pixels.save(&buffer, "PNG");
 		const auto uri = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(bytes.toBase64());
-		rasters.insert(key, new Raster{pixels, uri}, pixels.sizeInBytes() + uri.size() * sizeof(QChar));
+		rasters.insert(key, new Raster{pixels.size(), dpr, fingerprint, uri}, sizeof(Raster) + fingerprint.size() + uri.size() * sizeof(QChar));
 		return uri;
 	}
 
@@ -268,6 +278,10 @@ struct QtDialogBridge::Impl {
 		if (!background && (!frame || !frame->frameWidth())) return;
 		if (background) data.insert("background", widget->palette().color(widget->backgroundRole()).name());
 		data.insert("frameWidth", frame ? frame->frameWidth() : 0);
+		// Paint using the widget's original geometry so native gradients, borders,
+		// padding and QSS margins stay exact; transmit only the portion in view.
+		const auto paintRect = visibleRectangle(widget, dialog).translated(-widget->mapTo(dialog, QPoint()));
+		data.insert("decorationRect", rectangle(paintRect));
 		data.insert("decoration", raster(widget, QStringLiteral("decoration"), [&](QPainter &painter) {
 			// QSS paints its own background inside its margin/border box. Filling
 			// the whole widget here would incorrectly cover transparent margins.
@@ -284,7 +298,7 @@ struct QtDialogBridge::Impl {
 			if (frame->frameShadow() == QFrame::Sunken) option.state |= QStyle::State_Sunken;
 			else if (frame->frameShadow() == QFrame::Raised) option.state |= QStyle::State_Raised;
 			frame->style()->drawControl(QStyle::CE_ShapedFrame, &option, &painter, frame);
-		}));
+		}, paintRect));
 	}
 
 	QString identify(QWidget *widget)
@@ -822,8 +836,20 @@ public:
 	void publish(bool force)
 	{
 		if (!ready || failed || !dialog || !dialog->isVisible() || !web) return;
+		const auto timingFile = qEnvironmentVariable("OBS_WEBVIEW2_TRACE_PERFORMANCE");
+		QElapsedTimer timing;
+		if (!timingFile.isEmpty()) timing.start();
 		const auto state = bridge.snapshot();
+		const auto snapshotMs = timing.isValid() ? timing.nsecsElapsed() / 1e6 : 0.0;
 		const auto json = QJsonDocument(state).toJson(QJsonDocument::Compact);
+		if (timing.isValid()) {
+			QFile trace(timingFile);
+			if (trace.open(QIODevice::WriteOnly | QIODevice::Append))
+				trace.write(QJsonDocument(QJsonObject{{"component", "dialog"}, {"class", dialog->metaObject()->className()},
+					{"stage", "snapshot"}, {"snapshotMs", snapshotMs}, {"elapsedMs", timing.nsecsElapsed() / 1e6},
+					{"bytes", json.size()}, {"nodes", state.value("nodes").toArray().size()}, {"forced", force},
+					{"epochMs", QDateTime::currentMSecsSinceEpoch()}}).toJson(QJsonDocument::Compact) + '\n');
+		}
 		if (!force && json == lastSnapshot) return;
 		lastSnapshot = json;
 		QRegion region(dialog->rect());

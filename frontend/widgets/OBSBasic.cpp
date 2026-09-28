@@ -2019,6 +2019,10 @@ OBSBasic *OBSBasic::Get()
 
 QWidget *OBSBasic::FrontendWindow() const
 {
+	// Web panels now live inside the original QMainWindow. Its native docking,
+	// tray, fullscreen and close lifecycle remain authoritative.
+	if (property("webview2NativeDocking").toBool())
+		return const_cast<OBSBasic *>(this);
 	// Session ownership survives hiding to the tray. Visibility must not pick
 	// the native controller again while the WebView2 window is hidden.
 	for (auto *window : findChildren<QWidget *>(QStringLiteral("obsWebView2Window"), Qt::FindDirectChildrenOnly)) {

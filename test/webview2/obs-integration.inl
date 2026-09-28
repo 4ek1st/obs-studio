@@ -3,11 +3,11 @@ void runIntegrationChecks()
 {
 	if (QCoreApplication::arguments().contains(QStringLiteral("--webview2-lifecycle-only"))) {
 		blog(LOG_INFO, "[WebView2 test] Lifecycle-only test");
-		QTimer::singleShot(2000, this, &QWidget::close);
+		QTimer::singleShot(2000, main, &QWidget::close);
 		return;
 	}
 	// A previous portable test saves its enlarged window geometry.
-	resize(1280, 840);
+	main->resize(1280, 840);
 	struct Fixture {
 		OBSSceneAutoRelease first{obs_scene_create("WebView2 integration A")};
 		OBSSceneAutoRelease second{obs_scene_create("WebView2 integration B")};
@@ -25,11 +25,17 @@ void runIntegrationChecks()
 		blog(passed ? LOG_INFO : LOG_ERROR, "[WebView2 test] %s: %s", passed ? "PASS" : "FAIL", name);
 	};
 	check(QApplication::activeModalWidget() == nullptr, "Core-only startup has no plugin error dialog");
+	check(main->isVisible() && main->centralWidget() == this && !isWindow(),
+	      "WebView2 occupies the visible original OBS main window central widget");
+	check(main->property("webview2NativeDocking").toBool() &&
+	              main->dockOptions().testFlag(QMainWindow::AllowNestedDocks) &&
+	              main->dockOptions().testFlag(QMainWindow::AllowTabbedDocks),
+	      "Original OBS shell retains nested and tabbed native docking");
 	if (QCoreApplication::arguments().contains(QStringLiteral("--webview2-capture-test"))) {
 		RunCaptureDialogChecks(static_cast<OBSBasic *>(main), check, [this, fixture] {
 			QFile report(QDir(qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS")).filePath("capture-report.json"));
 			if (report.open(QIODevice::WriteOnly)) report.write(QJsonDocument(fixture->checks).toJson());
-			QTimer::singleShot(200, this, &QWidget::close);
+			QTimer::singleShot(200, main, &QWidget::close);
 		});
 		return;
 	}
@@ -54,6 +60,15 @@ void runIntegrationChecks()
 			allLabels &= !value.toObject().value("text").toString().trimmed().isEmpty();
 		check(allLabels, "All native controls including icon buttons have visible labels");
 		const auto workspace = snapshot();
+		QJsonArray redoShortcuts;
+		for (const auto &value : workspace.value("actions").toArray()) {
+			const auto action = value.toObject();
+			if (action.value("name") == QStringLiteral("actionMainRedo"))
+				redoShortcuts = action.value("shortcutKeys").toArray();
+		}
+		check(redoShortcuts.contains(QStringLiteral("Ctrl+Y")) &&
+		              redoShortcuts.contains(QStringLiteral("Ctrl+Shift+Z")),
+		      "Native Redo snapshot exposes both Ctrl+Y and Ctrl+Shift+Z");
 		check(workspace.value("sceneToolbar").toArray().size() >= 4,
 		      "Scene creation and editing toolbar is exposed to WebView2");
 		check(workspace.value("sourceToolbar").toArray().size() >= 4,
@@ -67,6 +82,15 @@ void runIntegrationChecks()
 		tree->selectionModel()->clearSelection();
 		tree->SelectItem(fixture->itemA, true);
 		const auto firstId = SourceId(obs_scene_get_source(fixture->first));
+		if (nativeCentral && width() >= 740) {
+			const auto parkedSize = nativeCentral->size();
+			nativeCentral->resize(420, parkedSize.height());
+			static_cast<OBSBasic *>(main)->UpdateContextBarVisibility();
+			static_cast<OBSBasic *>(main)->UpdateContextBar(true);
+			check(snapshot().value("sourceTools").toBool(),
+			      "Source toolbar availability follows the visible central workspace instead of the parked native view");
+			nativeCentral->resize(parkedSize);
+		}
 		auto send = [this](const char *command, QJsonObject args) {
 			execute(QJsonObject{{"id", "integration"}, {"command", QString::fromUtf8(command)}, {"args", args}});
 		};
@@ -81,6 +105,17 @@ void runIntegrationChecks()
 			send("action.invoke", QJsonObject{{"id", registerAction(rotate)}, {"context", snapshot().value("context")}});
 			check(obs_sceneitem_get_rot(fixture->itemB) == 90.0f && obs_sceneitem_get_rot(fixture->itemA) == 0.0f,
 			      "Rotate acts on the selected source before the next queued command");
+			auto *undo = main->findChild<QAction *>(QStringLiteral("actionMainUndo"));
+			auto *redo = main->findChild<QAction *>(QStringLiteral("actionMainRedo"));
+			check(undo && redo && undo->isEnabled(), "Rotate enables the native Undo action exposed to the browser");
+			if (undo && redo) {
+				send("action.invoke", QJsonObject{{"id", registerAction(undo)}, {"context", snapshot().value("context")}});
+				check(lastTestReply.value("ok").toBool() && obs_sceneitem_get_rot(fixture->itemB) == 0.0f && redo->isEnabled(),
+				      "Production action route invokes native Undo and enables Redo");
+				send("action.invoke", QJsonObject{{"id", registerAction(redo)}, {"context", snapshot().value("context")}});
+				check(lastTestReply.value("ok").toBool() && obs_sceneitem_get_rot(fixture->itemB) == 90.0f,
+				      "Production action route invokes native Redo on the original source");
+			}
 		}
 		tree->selectionModel()->clearSelection();
 		tree->SelectItem(fixture->otherChild, true);
@@ -129,7 +164,7 @@ void runIntegrationChecks()
 		check(obs_frontend_preview_program_mode_active() != beforeStudio, "Control changes actual OBS studio mode");
 		obs_frontend_set_preview_program_mode(beforeStudio);
 		const auto previousPreview = preview->geometry();
-		resize(2048, 1136);
+		main->resize(2048, 1136);
 		QTimer::singleShot(500, this, [this, fixture, check, previousPreview] {
 			check(preview->width() > previousPreview.width(), "Native preview grows after the real WebView2 window resize");
 			const QRect browserRect = browser->geometry();
@@ -154,13 +189,15 @@ void runIntegrationChecks()
 			};
 			auto *blocker = new DeclineClose(main);
 			main->installEventFilter(blocker);
-			close();
+			main->close();
 			QTimer::singleShot(100, this, [this, fixture, check, blocker] {
-				check(isVisible(), "Declining native shutdown keeps the WebView2 window usable");
+				check(main->isVisible() && isVisible() && main->centralWidget() == this,
+				      "Declining native shutdown keeps the original OBS shell and WebView2 usable");
 				main->removeEventFilter(blocker);
 				delete blocker;
 				RunAudioMixerIntegrationChecks(main, check);
-				RunAudioMixerVisualChecks(static_cast<OBSBasic *>(main), browser, [this] { publishState(true); }, check, [this, fixture, check] {
+				auto *mixerDock = main->findChild<QDockWidget *>(QStringLiteral("mixerDock"));
+				RunAudioMixerVisualChecks(static_cast<OBSBasic *>(main), webDockViews.value(mixerDock), [this] { publishState(true); }, check, [this, fixture, check] {
 				runWorkspaceChecks(check, [this, fixture, check] {
 				RunDialogWorkflowChecks(static_cast<OBSBasic *>(main), check, [this, fixture, check] {
 				RunOutputWorkflowChecks(static_cast<OBSBasic *>(main), check, [this, fixture, check] {
@@ -172,7 +209,7 @@ void runIntegrationChecks()
 				if (report.open(QIODevice::WriteOnly))
 					report.write(QJsonDocument(QJsonObject{{"checks", fixture->checks}}).toJson());
 				config_set_bool(obs_frontend_get_user_config(), "General", "ConfirmOnExit", false);
-				QTimer::singleShot(0, this, &QWidget::close);
+				QTimer::singleShot(0, main, &QWidget::close);
 				});
 				});
 				});

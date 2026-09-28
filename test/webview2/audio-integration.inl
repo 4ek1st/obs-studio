@@ -159,6 +159,7 @@ inline void RunAudioMixerVisualChecks(OBSBasic *main, WebView2Widget *browser,
 				     const std::function<void(bool, const char *)> &check,
 				     const std::function<void()> &done)
 {
+	if (!browser) { check(false, "Native mixer dock owns its WebView2 surface"); done(); return; }
 	struct Fixture {
 		OBSSourceAutoRelease source;
 		OBSScene scene;
@@ -176,13 +177,13 @@ inline void RunAudioMixerVisualChecks(OBSBasic *main, WebView2Widget *browser,
 	fixture->item = obs_scene_add(fixture->scene, fixture->source);
 	const QString uuid = QString::fromUtf8(obs_source_get_uuid(fixture->source));
 	const bool wasVertical = config_get_bool(obs_frontend_get_user_config(), "BasicWindow", "VerticalVolumeControl");
-	const QPointer<QWidget> window = browser->window();
+	const QPointer<QWidget> window = main;
 	const QPointer<WebView2Widget> browserGuard = browser;
 	const QSize originalSize = window->size();
 	const QPointer<QDockWidget> dock = main->findChild<QDockWidget *>(QStringLiteral("mixerDock"));
 	const bool wasFloating = dock && dock->isFloating();
 	const bool wasHidden = dock && dock->isHidden();
-	if (dock) { dock->setFloating(false); dock->show(); }
+	if (dock) { dock->setFloating(false); dock->show(); dock->raise(); }
 	check(dock && !dock->isFloating() && !dock->isHidden(),
 	      "Visual mixer fixture uses the visible attached native mixer dock");
 	if (!wasVertical) main->toggleMixerLayout();
@@ -257,8 +258,8 @@ inline void RunAudioMixerVisualChecks(OBSBasic *main, WebView2Widget *browser,
 				if (fixture->completed) return;
 				if (!browserGuard || !window) { finish(); return; }
 				const QImage pixels(png);
-				check(saved && !pixels.isNull() && pixels.width() >= 1000 && pixels.height() >= 600,
-				      "Actual OBS WebView2 vertical mixer with active PCM is captured as a PNG");
+				check(saved && !pixels.isNull() && pixels.width() >= 80 && pixels.height() >= 100,
+				      "Actual OBS WebView2 mixer dock with active PCM is captured as a PNG");
 				window->resize(1280, 720);
 				publish();
 				QTimer::singleShot(700, browserGuard, [fixture, browserGuard, window, check, finish, artifacts] {

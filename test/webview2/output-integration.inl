@@ -38,6 +38,7 @@ class OutputWorkflowChecks final : public QObject {
 	};
 	QPointer<OBSBasic> main;
 	QPointer<QWidget> frontend;
+	QPointer<QWidget> central;
 	std::function<void(bool, const char *)> check;
 	std::function<void()> done;
 	QTimer poll;
@@ -255,7 +256,8 @@ class OutputWorkflowChecks final : public QObject {
 		const QFileInfo file(recordingPath);
 		const auto relative = QDir(directory).relativeFilePath(file.absoluteFilePath());
 		const bool contained = !relative.startsWith("../") && !QDir::isAbsolutePath(relative);
-		check(!main->isVisible() && frontend->isVisible(), "Recording stop keeps WebView2 visible and the native main hidden");
+		check(main->isVisible() && frontend == main && central && central->isVisible() && main->centralWidget() == central,
+		      "Recording stop keeps the original OBS shell and its WebView2 central surface visible");
 		check(stoppedSignal && !recordingActive(), "Accepting the stop confirmation stops the native recording");
 		check(contained && file.isFile() && file.size() > 0 && encodedFrames > 0,
 		      "Real encoded recording persists as a nonempty file under the disposable test-recordings directory");
@@ -270,8 +272,8 @@ class OutputWorkflowChecks final : public QObject {
 	{
 		if (completed)
 			return;
-		if (!main || !frontend) {
-			fail("Recording workflow retains its native and WebView2 windows");
+		if (!main || !frontend || !central) {
+			fail("Recording workflow retains its native shell and WebView2 central surface");
 			finish();
 			return;
 		}
@@ -297,8 +299,9 @@ class OutputWorkflowChecks final : public QObject {
 		}
 		if (stage == Stage::Hide) {
 			if (!frontend->isVisible()) {
-				check(main->FrontendWindow() == frontend && !main->IsFrontendVisible() && !main->isVisible(),
-				      "Hiding the session window preserves ownership without exposing the native main");
+				check(frontend == main && main->FrontendWindow() == main && !main->IsFrontendVisible() &&
+				              !central->isVisible() && main->centralWidget() == central,
+				      "Hiding the original shell also hides WebView2 while preserving its central ownership");
 				check(QMetaObject::invokeMethod(main, "SetShowing", Qt::DirectConnection, Q_ARG(bool, true)),
 				      "Native show operation is callable through its Qt slot");
 				enter(Stage::Show);
@@ -308,12 +311,13 @@ class OutputWorkflowChecks final : public QObject {
 			return;
 		}
 		if (stage == Stage::Show) {
-			if (frontend->isVisible() && !main->isVisible()) {
-				check(main->IsFrontendVisible(), "SetShowing(true) restores the WebView2 session window");
+			if (frontend->isVisible() && main->isVisible() && central->isVisible()) {
+				check(main->IsFrontendVisible() && main->FrontendWindow() == main && main->centralWidget() == central,
+				      "SetShowing(true) restores the original OBS shell with the same WebView2 central surface");
 				const bool simple = QByteArray(config_get_string(main->Config(), "Output", "Mode")) == "Simple";
 				startAttempt(!simple);
 			} else if (elapsed.elapsed() > 5000) {
-				fail("SetShowing(true) restores WebView2 without showing the native main");
+				fail("SetShowing(true) restores the original shell and WebView2 central surface");
 			}
 			return;
 		}
@@ -350,8 +354,8 @@ class OutputWorkflowChecks final : public QObject {
 					fail("Stopping recording displays the expected native confirmation");
 					return;
 				}
-				check(frontend->isVisible() && !main->isVisible() && main->IsFrontendVisible(),
-				      "Stop-recording confirmation appears while WebView2 is visible and native main is hidden");
+				check(frontend == main && main->isVisible() && central->isVisible() && main->IsFrontendVisible(),
+				      "Stop-recording confirmation appears over the visible original OBS shell and WebView2");
 				check(box->parentWidget() == frontend, "Stop-recording confirmation is owned by the session window");
 				const bool accept = stage == Stage::AcceptDialog;
 				enter(accept ? Stage::Stopping : Stage::RejectUnwind);
@@ -406,10 +410,13 @@ public:
 			return;
 		}
 		frontend = main->FrontendWindow();
-		if (!frontend || frontend == main || !frontend->isVisible() || main->isVisible() || main->Active() ||
+		central = main->centralWidget();
+		if (!frontend || frontend != main || !frontend->isVisible() || !central || !central->isVisible() ||
+		    central->objectName() != QStringLiteral("obsWebView2Window") || central->isWindow() ||
+		    !main->property("webview2NativeDocking").toBool() || main->Active() ||
 		    main->RecordingActive() || obs_frontend_streaming_active() || obs_frontend_replay_buffer_active() ||
 		    obs_frontend_virtualcam_active()) {
-			check(false, "Output fixture starts with visible owning WebView2, hidden native main and idle outputs");
+			check(false, "Output fixture starts with WebView2 in the visible original OBS shell and idle outputs");
 			finish();
 			return;
 		}
@@ -434,11 +441,10 @@ public:
 			nested.setProperty("webview2OwnsSession", true);
 			QWidget secondary(main);
 			secondary.setObjectName("obsWebView2Window");
-			const QVariant ownership = frontend->property("webview2OwnsSession");
-			frontend->setProperty("webview2OwnsSession", false);
-			check(main->FrontendWindow() == main, "Nested or non-owning WebView2 widgets cannot take over native frontend identity");
-			frontend->setProperty("webview2OwnsSession", ownership);
-			check(main->FrontendWindow() == frontend, "Direct owning WebView2 window supplies frontend identity");
+			check(main->FrontendWindow() == main, "Nested or non-owning WebView2 widgets cannot take over native shell identity");
+			secondary.setProperty("webview2OwnsSession", true);
+			check(main->FrontendWindow() == main && main->centralWidget() == central,
+			      "Native docking keeps the original shell identity even when another WebView2 child claims ownership");
 		}
 		BPtr<char> root = GetAppConfigPathPtr("obs-studio/test-recordings");
 		directory = QString::fromUtf8(root.Get() ? root.Get() : "");

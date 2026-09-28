@@ -220,6 +220,28 @@ static QJsonObject persistenceSource(obs_source_t *source, PersistenceCapture &c
 	return result;
 }
 
+QJsonObject persistenceDockLayout(QJsonArray &errors) const
+{
+	QJsonObject docks;
+	const QStringList names{"scenesDock", "sourcesDock", "mixerDock", "transitionsDock"};
+	for (const auto &name : names) {
+		auto *dock = main->findChild<QDockWidget *>(name);
+		if (!dock) {
+			errors.append("Native persistence dock is missing: " + name);
+			continue;
+		}
+		QStringList tabs;
+		for (auto *peer : main->tabifiedDockWidgets(dock))
+			if (names.contains(peer->objectName())) tabs.append(peer->objectName());
+		tabs.sort();
+		QJsonArray peers;
+		for (const auto &peer : tabs) peers.append(peer);
+		docks.insert(name, QJsonObject{{"area", int(main->dockWidgetArea(dock))},
+			{"floating", dock->isFloating()}, {"tabs", peers}});
+	}
+	return docks;
+}
+
 QJsonObject persistenceSnapshot(QJsonArray &errors, QJsonObject &coverage) const
 {
 	PersistenceCapture capture;
@@ -283,10 +305,13 @@ QJsonObject persistenceSnapshot(QJsonArray &errors, QJsonObject &coverage) const
 	    sceneOrder.isEmpty() || capture.sources.isEmpty())
 		capture.errors.append("Native persistence state must contain a selected collection, profile, scenes and sources");
 	errors = capture.errors;
+	const auto nativeDockLayout = persistenceDockLayout(errors);
 	coverage = {{"scenes", sceneOrder.size()}, {"sources", capture.sources.size()}, {"sceneItems", capture.itemCount},
 		{"groups", capture.groupCount}, {"filters", capture.filterCount}, {"hiddenItems", capture.hiddenItems},
 		{"lockedItems", capture.lockedItems}, {"transformedItems", capture.transformedItems}};
-	return {{"context", context}, {"profileSettings", profileSettings}, {"sceneOrder", sceneOrder}, {"sources", capture.sources}};
+	coverage.insert("nativeDocks", nativeDockLayout.size());
+	return {{"context", context}, {"profileSettings", profileSettings}, {"sceneOrder", sceneOrder},
+		{"sources", capture.sources}, {"nativeDockLayout", nativeDockLayout}};
 }
 
 static bool writePersistenceJson(const QString &path, const QJsonObject &value)
@@ -312,6 +337,35 @@ void savePersistenceFixture(const std::function<void(bool, const char *)> &check
 	check(maySave, "Persistence capture starts after native outputs stop and scene saving is enabled");
 	if (!maySave)
 		return;
+	// Exercise native saveState/restoreState across two real processes. Change
+	// only this explicitly disposable fixture; no exact pixels or serialized
+	// layout bytes are compared, since screen/DPI adjustments are legitimate.
+	auto *scenes = main->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
+	auto *sources = main->findChild<QDockWidget *>(QStringLiteral("sourcesDock"));
+	auto *mixer = main->findChild<QDockWidget *>(QStringLiteral("mixerDock"));
+	auto *transitions = main->findChild<QDockWidget *>(QStringLiteral("transitionsDock"));
+	const bool haveDocks = scenes && sources && mixer && transitions;
+	check(haveDocks, "Nondefault persistence layout has all four original native docks");
+	if (!haveDocks) return;
+	for (auto *dock : {scenes, sources, mixer, transitions}) {
+		main->removeDockWidget(dock);
+		dock->setFloating(false);
+	}
+	main->addDockWidget(Qt::LeftDockWidgetArea, scenes);
+	main->addDockWidget(Qt::BottomDockWidgetArea, sources);
+	main->addDockWidget(Qt::BottomDockWidgetArea, mixer);
+	main->tabifyDockWidget(sources, mixer);
+	main->addDockWidget(Qt::RightDockWidgetArea, transitions);
+	transitions->setFloating(true);
+	for (auto *dock : {scenes, sources, mixer, transitions}) dock->show();
+	sources->raise();
+	const bool layoutReady = main->dockWidgetArea(scenes) == Qt::LeftDockWidgetArea &&
+		main->dockWidgetArea(sources) == Qt::BottomDockWidgetArea &&
+		main->dockWidgetArea(mixer) == Qt::BottomDockWidgetArea &&
+		!scenes->isFloating() && !sources->isFloating() && !mixer->isFloating() &&
+		main->tabifiedDockWidgets(sources).contains(mixer) && transitions->isFloating();
+	check(layoutReady, "Persistence fixture uses scenes left, sources/mixer tabs and floating transitions");
+	if (!layoutReady) return;
 	basic->SaveProject();
 	basic->SaveProjectDeferred();
 	const bool savedProfile = config_save_safe(basic->Config(), "tmp", "bak") == CONFIG_SUCCESS;
@@ -355,8 +409,10 @@ void runPersistenceChecks()
 			blog(value ? LOG_INFO : LOG_ERROR, "[WebView2 persistence test] %s: %s", value ? "PASS" : "FAIL", name);
 		};
 		persistenceComparatorChecks(check);
-		check(isVisible() && !main->isVisible() && static_cast<OBSBasic *>(main)->FrontendWindow() == this,
-		      "Restart restores WebView2 as the visible owning frontend");
+		check(isVisible() && main->isVisible() && main->centralWidget() == this && !isWindow() &&
+		              main->property("webview2NativeDocking").toBool() &&
+		              static_cast<OBSBasic *>(main)->FrontendWindow() == main,
+		      "Restart restores WebView2 inside the visible original OBS shell");
 		check(!static_cast<OBSBasic *>(main)->Active() && !obs_frontend_recording_active(),
 		      "Persistence restart does not start native outputs");
 		QFile fixtureFile(persistencePath("webview2-persistence-fixture.json"));
@@ -374,7 +430,7 @@ void runPersistenceChecks()
 		const auto expected = fixture.value("state").toObject();
 		if (valid) {
 			persistenceDifferences(expected, actual, "/state", differences);
-			for (const auto &key : QStringList{"context", "profileSettings", "sceneOrder", "sources"}) {
+			for (const auto &key : QStringList{"context", "profileSettings", "sceneOrder", "sources", "nativeDockLayout"}) {
 				QJsonArray category;
 				persistenceDifferences(expected.value(key), actual.value(key), "/state/" + key, category);
 				const auto label = ("Native " + key + " persists across a full OBS restart").toUtf8();
@@ -392,6 +448,6 @@ void runPersistenceChecks()
 		blog(passed ? LOG_INFO : LOG_ERROR, "[WebView2 persistence test] %s, differences=%lld",
 		     passed ? "PASS" : "FAIL", static_cast<long long>(differences.size()));
 		config_set_bool(obs_frontend_get_user_config(), "General", "ConfirmOnExit", false);
-		QTimer::singleShot(0, this, &QWidget::close);
+		QTimer::singleShot(0, main, &QWidget::close);
 	});
 }

@@ -5,7 +5,10 @@
 #include <QSaveFile>
 
 #include <QDir>
+#include <QDateTime>
+#include <QElapsedTimer>
 #include <QEvent>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -30,6 +33,25 @@ struct WebView2Widget::Impl {
 	ComPtr<ICoreWebView2Environment> environment;
 	ComPtr<ICoreWebView2Controller> controller;
 	ComPtr<ICoreWebView2> webview;
+	// A caller-supplied JSONL path; no diagnostics are written by default.
+	QString timingFile = qEnvironmentVariable("OBS_WEBVIEW2_TRACE_PERFORMANCE");
+	QElapsedTimer startupTime;
+	quint64 timingId = 0;
+
+	void trace(const char *stage)
+	{
+		if (timingFile.isEmpty()) return;
+		if (!startupTime.isValid()) {
+			static quint64 nextId = 0;
+			timingId = ++nextId;
+			startupTime.start();
+		}
+		QFile file(timingFile);
+		if (!file.open(QIODevice::WriteOnly | QIODevice::Append)) return;
+		file.write(QJsonDocument(QJsonObject{{"component", "host"}, {"host", qint64(timingId)}, {"document", document},
+			{"stage", QString::fromLatin1(stage)}, {"elapsedMs", startupTime.nsecsElapsed() / 1e6},
+			{"epochMs", QDateTime::currentMSecsSinceEpoch()}}).toJson(QJsonDocument::Compact) + '\n');
+	}
 };
 
 WebView2Widget::WebView2Widget(QWidget *parent, QString assetsPath, QString profilePath, QString document)
@@ -38,8 +60,15 @@ WebView2Widget::WebView2Widget(QWidget *parent, QString assetsPath, QString prof
 	impl->assets = QDir(assetsPath).absolutePath();
 	impl->profile = QDir(profilePath).absolutePath();
 	impl->document = std::move(document);
+	impl->trace("construct");
 	setAttribute(Qt::WA_DontCreateNativeAncestors);
+	// WebView needs one HWND. Without this scoped policy Qt permanently marks
+	// its parent nativeChildrenForced, turning later Settings/hotkey controls
+	// into thousands of native windows when their layouts reparent them.
+	const bool dontCreateSiblings = QCoreApplication::testAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
+	QCoreApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings, true);
 	setAttribute(Qt::WA_NativeWindow);
+	QCoreApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings, dontCreateSiblings);
 	setFocusPolicy(Qt::StrongFocus);
 	QTimer::singleShot(0, this, [this] { initialize(); });
 }
@@ -66,6 +95,7 @@ void WebView2Widget::reportFailure(const QString &stage, long result)
 
 void WebView2Widget::initialize()
 {
+	impl->trace("initialize");
 	if (QFileInfo(impl->document).fileName() != impl->document || !impl->document.endsWith(QStringLiteral(".html")) ||
 	    !QFileInfo::exists(impl->assets + QLatin1Char('/') + impl->document) ||
 	    !QDir().mkpath(impl->profile)) {
@@ -91,6 +121,7 @@ void WebView2Widget::initialize()
 					return S_OK;
 				}
 				guard->impl->environment = environment;
+				guard->impl->trace("environment-ready");
 				const HRESULT created = environment->CreateCoreWebView2Controller(
 					reinterpret_cast<HWND>(guard->winId()),
 					Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
@@ -106,6 +137,7 @@ void WebView2Widget::initialize()
 								return S_OK;
 							}
 							auto &state = *guard->impl;
+							state.trace("controller-ready");
 							state.controller = controller;
 							if (FAILED(controller->get_CoreWebView2(&state.webview))) {
 								guard->reportFailure(QStringLiteral("Cannot access WebView2"), E_FAIL);
@@ -117,8 +149,9 @@ void WebView2Widget::initialize()
 								return S_OK;
 							}
 							const auto directory = state.assets.toStdWString();
+							const auto localHost = QString::fromLatin1(OBSWeb::LocalUiHost).toStdWString();
 							const HRESULT mapping = localContent->SetVirtualHostNameToFolderMapping(
-								L"obs-ui.local", directory.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+								localHost.c_str(), directory.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
 							if (FAILED(mapping)) {
 								guard->reportFailure(QStringLiteral("Cannot map WebView2 resources"), mapping);
 								return S_OK;
@@ -225,9 +258,13 @@ void WebView2Widget::initialize()
 											return S_OK;
 										}
 										guard->impl->loaded = true;
+										guard->impl->trace("navigation-completed");
 										QTimer::singleShot(0, guard.data(), [guard] {
-											if (guard)
+											if (guard) {
+												guard->impl->trace("ready");
 												emit guard->ready();
+											}
+											if (guard) guard->impl->trace("ready-handlers-returned");
 											if (guard)
 												guard->queueBoundsUpdate();
 										});
@@ -243,7 +280,8 @@ void WebView2Widget::initialize()
 							guard->updateBounds();
 							guard->queueBoundsUpdate();
 							controller->put_IsVisible(guard->isVisible());
-							const auto url = (QStringLiteral("https://obs-ui.local/") + state.document).toStdWString();
+							const auto url = (QStringLiteral("https://") + QLatin1String(OBSWeb::LocalUiHost) + QLatin1Char('/') + state.document).toStdWString();
+							state.trace("navigate");
 							const HRESULT navigate = state.webview->Navigate(url.c_str());
 							if (FAILED(navigate))
 								guard->reportFailure(QStringLiteral("Cannot navigate to local WebView2 interface"), navigate);

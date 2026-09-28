@@ -22,8 +22,8 @@ int main(int argc, char **argv)
 	QApplication app(argc, argv);
 	int checks = 0, failed = 0;
 	auto check = [&](bool ok, const char *what) { ++checks; if (!ok) { ++failed; std::cerr << "FAIL: " << what << '\n'; } };
-	check(OBSWeb::IsExternalDropOrigin("https://obs-ui.local/index.html"), "workspace is trusted");
-	for (const auto *origin : {"https://example.com/index.html", "https://obs-ui.local/dialog.html", "file:///index.html", "https://obs-ui.local:444/index.html"})
+	check(OBSWeb::IsExternalDropOrigin("https://obs-ui.example/index.html"), "workspace is trusted");
+	for (const auto *origin : {"https://example.com/index.html", "https://obs-ui.example/dialog.html", "file:///index.html", "https://obs-ui.example:444/index.html", "https://obs-ui.local/index.html"})
 		check(!OBSWeb::IsExternalDropOrigin(origin), "other origins/documents cannot import drops");
 	QString error;
 	QTemporaryFile file; if (!file.open()) return 2;
