@@ -93,6 +93,10 @@ void PluginManager::loadAllPlugins(bool usePortableMode)
 		throw "Failed to load core OBS modules. OBS cannot run without these modules. Please try reinstalling OBS.";
 	}
 
+	// CoreOnly also completed successfully when all required core modules loaded.
+	// Leave Failure set on the exception path above.
+	loadState_ = State::Success;
+
 	if (loadMode_ == Mode::Full) {
 		blog(LOG_INFO, "---------------------------------");
 		State pluginState = loadPlugins(usePortableMode);
