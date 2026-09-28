@@ -12,6 +12,16 @@ public:
 	SliderIgnoreScroll(QWidget *parent = nullptr);
 	SliderIgnoreScroll(Qt::Orientation orientation, QWidget *parent = nullptr);
 
+	// A focused embedded frontend can forward input without moving Qt focus
+	// away from its own surface. The normal native wheel focus gate is unchanged.
+	void handleFrontendWheel(QWheelEvent *event) { QSlider::wheelEvent(event); }
+	QStyleOptionSlider frontendStyleOption() const
+	{
+		QStyleOptionSlider option;
+		initStyleOption(&option);
+		return option;
+	}
+
 protected:
 	virtual void wheelEvent(QWheelEvent *event) override;
 };

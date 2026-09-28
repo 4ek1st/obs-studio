@@ -53,6 +53,7 @@ private:
 	OBSSourceLabel *label = nullptr;
 
 	QLineEdit *editor = nullptr;
+	OBSScene webEditScene;
 
 	std::string newName;
 

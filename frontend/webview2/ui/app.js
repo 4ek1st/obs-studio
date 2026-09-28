@@ -9,7 +9,7 @@ let menuSignature = "", boundsFrame = 0, connected = false;
 const boundsSignatures = new Map(), audioElements = new Map(), actionsByName = new Map();
 const defaultPanelOrder = ["scenesDock","sourcesDock","mixerDock","transitionsDock","controlsDock"];
 let panelMode = "";
-const nativeCommands = new Set(["action.invoke", "control.click", "native.command", "source.visibility", "source.lock", "source.expand", "source.rename", "source.move", "scene.rename", "scene.move"]);
+const nativeCommands = new Set(["action.invoke", "control.click", "native.command", "source.visibility", "source.lock", "source.expand", "source.rename", "source.move", "source.selectAll", "scene.rename", "scene.move", "scene.activate"]);
 const iconPaths = {
   plus:"M8 2v12M2 8h12", trash:"M3 4h10M6 2h4M4 4l1 10h6l1-10M7 6v6M9 6v6",
   up:"M3 10l5-5 5 5", down:"M3 6l5 5 5-5", gear:"M6 2h4l.5 2 2 .5 1 3-1 3-2 .5-.5 2H6l-.5-2-2-.5-1-3 1-3 2-.5zM10 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0",
@@ -120,45 +120,76 @@ function renderToolbar(id,items) {
   if(id==="source-toolbar")nodes.push(iconButton("folder","Группировать выделенные источники",()=>request("native.command",{id:"source.group"}),state.sources.some(x=>x.selected)));
   target.replaceChildren(...nodes);
 }
-async function selectSource(row,event) {
-  return request("source.select",{...sourceArgs(row),additive:!!(event?.ctrlKey||event?.metaKey),range:!!event?.shiftKey});
+function listDropPosition(rect,event,group=false,grid=false) {
+  const fraction=grid?(event.clientX-rect.left)/rect.width:(event.clientY-rect.top)/rect.height;
+  if(group&&fraction>.2&&fraction<.8)return "inside";
+  return fraction>.5?"after":"before";
 }
-function rename(kind,row) {
-  closeMenus();renameTarget={kind,row};$("rename-title").textContent=kind==="scene"?"Переименовать сцену":"Переименовать источник";
-  $("rename-value").value=row.name;$("rename-dialog").returnValue="";$("rename-dialog").showModal();$("rename-value").select();scheduleBounds();
+function listNavigationTarget(entries,index,key,grid=false,viewportHeight=0) {
+  if(!entries.length)return index;
+  if(key==="Home")return 0;if(key==="End")return entries.length-1;
+  const rects=entries.map(entry=>entry.getBoundingClientRect()),current=rects[index];
+  if(!current)return index;
+  if(key==="PageUp"||key==="PageDown"){
+    const target=current.top+(key==="PageUp"?-1:1)*Math.max(current.height,viewportHeight);
+    return rects.reduce((best,rect,i)=>Math.abs(rect.top-target)<Math.abs(rects[best].top-target)?i:best,index);
+  }
+  if(grid&&(key==="ArrowUp"||key==="ArrowDown")){
+    const direction=key==="ArrowUp"?-1:1,candidates=rects.map((rect,i)=>({rect,i})).filter(({rect})=>(rect.top-current.top)*direction>1);
+    candidates.sort((a,b)=>Math.abs(a.rect.top-current.top)-Math.abs(b.rect.top-current.top)||Math.abs(a.rect.left-current.left)-Math.abs(b.rect.left-current.left));
+    return candidates[0]?.i??index;
+  }
+  const step=(key==="ArrowUp"||key==="ArrowLeft")?-1:(key==="ArrowDown"||key==="ArrowRight")?1:0;
+  return Math.max(0,Math.min(entries.length-1,index+step));
+}
+async function selectSource(row,event) {
+  return request("source.select",{...sourceArgs(row),additive:!!(event?.ctrlKey||event?.metaKey),range:!!event?.shiftKey,focusOnly:!!event?.focusOnly});
+}
+async function rename(kind,row) {
+  closeMenus();
+  if(kind==="scene"&&row.uuid!==state.currentScene)await request("scene.select",{uuid:row.uuid});
+  const list=$(kind==="source"?"sources":"scenes"),identity=kind==="source"?keyOf(row):row.uuid;
+  const entry=Array.from(list.children).find(node=>node.dataset.id===identity),name=entry?.querySelector(".name");
+  if(!name||entry.querySelector("input"))return;
+  const editor=document.createElement("input");editor.className="row-name-editor";editor.value=row.name;editor.dataset.scene=state.currentScene;editor.dataset.identity=identity;editor.setAttribute("aria-label","Переименовать");
+  name.replaceChildren(editor);entry.draggable=false;let finished=false;
+  const finish=async(save,notify=true)=>{if(finished)return;finished=true;entry.draggable=true;name.textContent=row.name;
+    if(kind==="source"&&notify)await request("source.rename",{...sourceArgs(row),name:editor.value,save});
+    else if(save&&editor.value!==row.name)await request("scene.rename",{uuid:row.uuid,name:editor.value});
+    list.dataset.signature="";renderRows(list,kind==="source"?state.sources:state.scenes,kind==="source");
+    Array.from(list.children).find(node=>node.dataset.id===identity)?.focus({preventScroll:true});};
+  // A native model reset already finalized its pending editor before publishing
+  // this replacement state. Do not send an obsolete item/scene back to OBS.
+  editor.cancelRename=()=>finish(false,false);
+  editor.addEventListener("keydown",event=>{event.stopPropagation();if(event.key==="Enter"&&!event.isComposing){event.preventDefault();finish(true);}else if(event.key==="Escape"){event.preventDefault();finish(false);}});
+  editor.addEventListener("blur",()=>finish(true));editor.focus();editor.select();
 }
 function actionEntry(name) { return actionsByName.get(name)||null; }
+function finishNativeRename() {
+  for(const id of ["sources","scenes"])$(id).querySelector(".row-name-editor")?.cancelRename();
+}
 function rowContext(event,row,sources) {
-  const items=sources ? [
-    actionEntry("actionAddSource"),{text:"Переименовать",callback:()=>rename("source",row)},
-    actionEntry("actionRemoveSource"),{separator:true},actionEntry("actionCopySource"),actionEntry("actionPasteRef"),actionEntry("actionPasteDup"),
-    {separator:true},{text:"Группировать выделенные",callback:()=>request("native.command",{id:"source.group"})},
-    {text:"Разгруппировать",enabled:row.group,callback:()=>request("native.command",{id:"source.ungroup"})},
-    actionEntry("transformMenu"),actionEntry("orderMenu"),{separator:true},
-    {text:"Свойства",callback:()=>request("source.properties",{uuid:row.uuid})},
-    {text:"Фильтры",callback:()=>request("source.filters",{uuid:row.uuid})},
-    {text:"Все действия источника…",callback:()=>request("native.command",{id:"source.context",...sourceArgs(row)})}
-  ] : [
-    actionEntry("actionAddScene"),{text:"Дублировать",callback:()=>request("native.command",{id:"scene.duplicate"})},
-    {text:"Переименовать",callback:()=>rename("scene",row)},actionEntry("actionRemoveScene"),
-    {separator:true},actionEntry("actionSceneUp"),actionEntry("actionSceneDown"),actionEntry("actionSceneFilters"),
-    {text:"Все действия сцены…",callback:()=>request("native.command",{id:"scene.context"})}
-  ];
-  showContext(event,items.filter(Boolean));
+  event.preventDefault();closeMenus();
+  request("native.command",sources?{...sourceArgs(row),item:row.id,id:"source.context"}:{id:"scene.context"});
 }
 function renderRows(element,rows,sources=false) {
+  const editor=element.querySelector(".row-name-editor");
+  if(editor){if(editor.dataset.scene!==state.currentScene||!rows.some(row=>(sources?keyOf(row):row.uuid)===editor.dataset.identity))editor.cancelRename();return;}
   const signature=JSON.stringify([rows,state.currentScene]);
   if(element.dataset.signature===signature)return;element.dataset.signature=signature;
   const focused=element.contains(document.activeElement)?document.activeElement.closest(".row")?.dataset.id:null;
   const scroll=element.scrollTop,nodes=[];
   for(const row of rows) {
-    const identity=sources?keyOf(row):row.uuid;const entry=document.createElement("div");entry.className="row";entry.tabIndex=0;
+    const identity=sources?keyOf(row):row.uuid;const entry=document.createElement("div");entry.className="row";
+    const tabRow=sources?(rows.find(value=>value.selected)??rows[0]):(rows.find(value=>value.uuid===state.currentScene)??rows[0]);
+    entry.tabIndex=row===tabRow?0:-1;
     entry.dataset.id=identity;entry.setAttribute("role","option");entry.setAttribute("aria-selected",String(sources?row.selected:row.uuid===state.currentScene));
     entry.draggable=true;entry.style.paddingLeft=(5+(row.depth||0)*16)+"px";
     if(sources&&row.group){const expand=button(row.collapsed?"▸":"▾",e=>{e.stopPropagation();request("source.expand",{...sourceArgs(row),value:!!row.collapsed});});expand.className="expand";expand.setAttribute("aria-label",row.collapsed?"Развернуть группу":"Свернуть группу");entry.append(expand);}
     const type=document.createElement("span");type.className="type-icon";
     if(sources&&row.icon?.startsWith("data:image/png;base64,")){const image=document.createElement("img");image.src=row.icon;image.width=image.height=16;image.alt="";type.append(image);}else type.append(icon(row.group?"folder":sources?"image":"monitor"));
-    const name=document.createElement("span");name.className="name";name.textContent=row.name;entry.append(type,name);
+    const name=document.createElement("span");name.className="name";name.textContent=row.name;if(sources)entry.append(type);entry.append(name);
+    if(sources&&/^#[0-9a-f]{8}$/i.test(row.color||""))entry.style.setProperty("--source-color",row.color);
     if(sources) {
       const visible=iconButton("eye",row.visible?"Скрыть источник":"Показать источник",e=>{e.stopPropagation();request("source.visibility",{...sourceArgs(row),value:!row.visible});});
       visible.className="flag"+(row.visible?"":" off");visible.setAttribute("aria-pressed",String(row.visible));
@@ -166,15 +197,20 @@ function renderRows(element,rows,sources=false) {
       locked.className="flag"+(row.locked?"":" off");locked.setAttribute("aria-pressed",String(row.locked));entry.append(visible,locked);
     }
     const select=event=>sources?selectSource(row,event):request("scene.select",{uuid:row.uuid});
-    entry.addEventListener("click",event=>{if(!event.target.closest("button"))select(event);});
-    entry.addEventListener("dblclick",event=>{if(sources&&!event.target.closest("button"))request("source.properties",{uuid:row.uuid});});
-    entry.addEventListener("keydown",event=>{
+    entry.addEventListener("click",event=>{if(!event.target.closest("button,input"))select(event);});
+    entry.addEventListener("dblclick",async event=>{if(event.target.closest("button,input"))return;if(sources){if(row.group)request("source.expand",{...sourceArgs(row),value:!!row.collapsed});else request("source.properties",{uuid:row.uuid});}else{if(state.currentScene!==row.uuid)await select({});request("scene.activate",{uuid:row.uuid});}});
+    if(sources){entry.addEventListener("mouseenter",()=>request("source.hover",{...sourceArgs(row),value:true}));entry.addEventListener("mouseleave",()=>request("source.hover",{...sourceArgs(row),value:false}));}
+    entry.addEventListener("keydown",async event=>{
       if(event.target!==entry)return;
-      if(event.key==="Enter"||event.key===" "){event.preventDefault();select(event);}
-      else if(event.key==="F2"){event.preventDefault();rename(sources?"source":"scene",row);}
+      if(sources&&(event.ctrlKey||event.metaKey)&&!event.shiftKey&&event.code==="KeyA"){event.preventDefault();request("source.selectAll",{scene:state.currentScene});}
+      else if(event.key==="Enter"||event.key===" "){event.preventDefault();select(event);}
+      else if(event.key==="F2"){event.preventDefault();const selected=sources?state.sources.find(value=>value.selected):state.scenes.find(value=>value.uuid===state.currentScene);if(selected)rename(sources?"source":"scene",selected);}
       else if(event.key==="Delete"){event.preventDefault();invokeName(sources?"actionRemoveSource":"actionRemoveScene");}
-      else if(event.key==="ArrowUp"||event.key==="ArrowDown"){
-        event.preventDefault();const next=event.key==="ArrowUp"?entry.previousElementSibling:entry.nextElementSibling;next?.focus();next?.click();
+      else if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","PageUp","PageDown"].includes(event.key)){
+        if(sources&&(event.key==="ArrowLeft"||event.key==="ArrowRight"))return;
+        event.preventDefault();const entries=Array.from(element.children),index=entries.indexOf(entry),grid=!sources&&!!state.workspace?.actionSceneGridMode;
+        const next=listNavigationTarget(entries,index,event.key,grid,element.clientHeight),target=rows[next];entries[next]?.focus();
+        if(target){if(sources)selectSource(target,{ctrlKey:event.ctrlKey,metaKey:event.metaKey,shiftKey:event.shiftKey,focusOnly:(event.ctrlKey||event.metaKey)&&!event.shiftKey});else if(!event.ctrlKey&&!event.metaKey)request("scene.select",{uuid:target.uuid});}
       }
     });
     entry.addEventListener("contextmenu",async event=>{
@@ -183,13 +219,15 @@ function renderRows(element,rows,sources=false) {
       rowContext(position,row,sources);
     });
     entry.addEventListener("dragstart",event=>{dragged={row,sources,scene:state.currentScene};event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",identity);});
+    entry.addEventListener("dragend",()=>{dragged=null;for(const node of element.children)node.classList.remove("drag-over");});
     entry.addEventListener("dragover",event=>{if(dragged?.sources===sources){event.preventDefault();entry.classList.add("drag-over");}});
     entry.addEventListener("dragleave",()=>entry.classList.remove("drag-over"));
     entry.addEventListener("drop",async event=>{
-      event.preventDefault();entry.classList.remove("drag-over");if(!dragged||dragged.sources!==sources)return;
+      event.preventDefault();event.stopPropagation();entry.classList.remove("drag-over");if(!dragged||dragged.sources!==sources)return;
       const from=dragged;dragged=null;
-      if(sources){if(from.scene!==state.currentScene)return;if(!state.sources.find(s=>keyOf(s)===keyOf(from.row))?.selected)await selectSource(from.row,{});request("source.move",{...sourceArgs(from.row),target:sourceArgs(row),position:row.group&&event.altKey?"inside":event.offsetY>entry.clientHeight/2?"after":"before"});}
-      else{await request("scene.select",{uuid:from.row.uuid});request("scene.move",{uuid:from.row.uuid,target:row.uuid});}
+      const position=listDropPosition(entry.getBoundingClientRect(),event,sources&&row.group,!sources&&!!state.workspace?.actionSceneGridMode);
+      if(sources){if(from.scene!==state.currentScene)return;if(!state.sources.find(s=>keyOf(s)===keyOf(from.row))?.selected)await selectSource(from.row,{});request("source.move",{...sourceArgs(from.row),target:sourceArgs(row),position});}
+      else{await request("scene.select",{uuid:from.row.uuid});request("scene.move",{uuid:from.row.uuid,target:row.uuid,position});}
     });
     nodes.push(entry);
   }
@@ -199,6 +237,42 @@ function renderRows(element,rows,sources=false) {
   }
   element.replaceChildren(...nodes);element.scrollTop=scroll;
   if(focused)Array.from(element.children).find(x=>x.dataset.id===focused)?.focus({preventScroll:true});
+}
+function installNativeFaderInput(volume,uuid,dispatch) {
+  const keys=new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","PageUp","PageDown","Home","End"]);
+  volume.addEventListener("keydown",event=>{
+    if(volume.disabled||event.defaultPrevented||event.isComposing||event.altKey||event.metaKey||!keys.has(event.key))return;
+    event.preventDefault();dispatch("audio.key",{uuid,key:event.key,control:!!event.ctrlKey,shift:!!event.shiftKey});
+  });
+  volume.addEventListener("wheel",event=>{
+    if(volume.disabled||document.activeElement!==volume||event.altKey||event.metaKey)return;
+    // Chromium preserves the Windows wheel angle in wheelDeltaY. Keep partial
+    // wheel ticks and let the original QSlider accumulate and accelerate them.
+    const raw=Number.isFinite(event.wheelDeltaY)?event.wheelDeltaY:
+      -event.deltaY*(event.deltaMode===1?40:event.deltaMode===2?120:1.2);
+    const value=Math.round(raw);if(!value)return;
+    event.preventDefault();dispatch("audio.wheel",{uuid,value,control:!!event.ctrlKey,shift:!!event.shiftKey});
+  },{passive:false});
+}
+function applyNativeMixerMetrics(container, metrics, vertical) {
+  // Qt and WebView can use different logical pixel scales on the same monitor.
+  // Convert native dimensions once, including text, without reducing OBS's
+  // configured font size or inventing a minimum from the main-window font.
+  const nativeDpr=Number(metrics?.devicePixelRatio),browserDpr=window.devicePixelRatio||1;
+  const scale=vertical&&nativeDpr>0&&Number.isFinite(nativeDpr)?nativeDpr/browserDpr:1;
+  container.style.setProperty("--channel-native-scale",String(scale));
+  if(!metrics)return;
+  for(const [key,variable]of [["minimumHeight","channel-min-height"],["meterMinimumHeight","meter-min-height"],
+    ["bodyMinimumHeight","meter-body-min-height"],["bottomPadding","channel-bottom-padding"],
+    ["categoryHeight","channel-category-height"],["nameHeight","channel-name-height"],
+    ["dbHeight","channel-db-height"],["buttonsHeight","channel-buttons-height"],["buttonWidth","channel-button-width"],
+    ["categoryFontSize","channel-category-font"],["nameFontSize","channel-name-font"],
+    ["dbFontSize","channel-db-font"],["meterFontSize","channel-meter-font"]]){
+    const value=Number(metrics[key]);
+    if(Number.isFinite(value)&&value>=0)container.style.setProperty("--"+variable,value+"px");
+  }
+  if(metrics.bodyMinimumHeight>=metrics.meterMinimumHeight)
+    container.style.setProperty("--meter-frame-padding",((metrics.bodyMinimumHeight-metrics.meterMinimumHeight)/2)+"px");
 }
 function renderMixer(channels) {
   const present=new Set(), vertical=!!state.workspace?.verticalMixer;
@@ -224,8 +298,8 @@ function renderMixer(channels) {
       for(let value=0;value>=-60;value-=6){const label=document.createElement("span");label.textContent=value;label.style.setProperty("--tick",String(-value/60));scale.append(label);}
       meterFrame.append(meters,scale);body.append(fader,meterFrame);
       const buttons=document.createElement("div");buttons.className="audio-buttons";
-      let pending,flight=false,pointerEditing=false;
-      const volumeBusy=()=>pointerEditing||flight||pending!==undefined;
+      let pending,flight=false,pointerEditing=false,inputFlight=0;
+      const volumeBusy=()=>pointerEditing||flight||pending!==undefined||inputFlight>0;
       const endVolumeEdit=()=>{
         pointerEditing=false;
         const current=state?.audio.find(item=>item.uuid===channel.uuid);
@@ -235,11 +309,14 @@ function renderMixer(channels) {
       for(const event of ["pointerup","pointercancel","lostpointercapture"])volume.addEventListener(event,endVolumeEdit);
       const sendVolume=async()=>{if(flight)return;flight=true;while(pending!==undefined){const value=pending;pending=undefined;await request("audio.volume",{uuid:channel.uuid,value});}flight=false;};
       volume.addEventListener("input",()=>{fader.style.setProperty("--volume",Number(volume.value)*100+"%");pending=Number(volume.value);sendVolume();});
+      installNativeFaderInput(volume,channel.uuid,async(command,args)=>{
+        ++inputFlight;try{await request(command,args);}finally{--inputFlight;endVolumeEdit();}
+      });
       const mute=iconButton("volume","Заглушить",()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.mute",{uuid:channel.uuid,value:!current.muted});});mute.className="audio-mute";
       const monitor=iconButton("headphones","Включить мониторинг",()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.monitor",{uuid:channel.uuid,value:current.monitoring?0:2});});monitor.className="audio-monitor";
       buttons.append(mute,monitor);controls.append(body,buttons);container.append(title,controls);
       container.addEventListener("contextmenu",event=>{event.preventDefault();context();});
-      entry={container,name,nameText,category,db,volume,volumeBusy,mute,monitor,meters,fader,ticks};audioElements.set(channel.uuid,entry);
+      entry={container,name,nameText,category,db,volume,volumeBusy,mute,monitor,meters,bars:[],fader,ticks};audioElements.set(channel.uuid,entry);
     }
     entry.nameText.textContent=channel.name;entry.name.title=channel.name;entry.name.setAttribute("aria-label","Действия канала: "+channel.name);
     entry.category.textContent=channel.category|| (channel.global?"Глобальный":channel.pinned?"Закреплён":channel.active===false?"Неактивен":"Активен");
@@ -257,11 +334,28 @@ function renderMixer(channels) {
       if(control.dataset.icon!==signature){control.dataset.icon=signature;if(image?.startsWith("data:image/png;base64,")){const img=document.createElement("img");img.src=image;img.alt="";control.replaceChildren(img);}else control.replaceChildren(icon(fallback));}
     }
     const count=Math.max(1,Math.min(8,channel.channels||2));
-    if(entry.meters.childElementCount!==count){entry.meters.replaceChildren();for(let n=0;n<count;n++){const bar=document.createElement("div");bar.className="meter";const peak=document.createElement("span");peak.className="meter-peak";bar.append(peak);entry.meters.append(bar);}}
+    if(entry.meters.childElementCount!==count){
+      entry.meters.replaceChildren();entry.bars=[];
+      for(let n=0;n<count;n++){
+        const bar=document.createElement("div");bar.className="meter";
+        const track=document.createElement("div");track.className="meter-track";
+        const peak=document.createElement("span");peak.className="meter-peak";
+        const hold=document.createElement("span");hold.className="meter-mark meter-hold";
+        const magnitude=document.createElement("span");magnitude.className="meter-mark meter-magnitude";
+        const input=document.createElement("span");input.className="meter-input";input.hidden=true;
+        track.append(peak,hold,magnitude);bar.append(track,input);entry.meters.append(bar);entry.bars.push({peak,hold,magnitude,input});
+      }
+    }
     entry.meters.style.setProperty("--channels",String(count));
+    entry.meters.style.setProperty("--meter-thickness",Math.max(3,Math.min(6,channel.meterThickness||4))+"px");
     entry.container.style.setProperty("--channel-width",Math.max(70,Math.min(110,channel.preferredWidth||88))+"px");
+    applyNativeMixerMetrics(entry.container,channel.verticalMetrics,vertical);
     for(const [key,variable] of [["categoryColor","category-text"],["categoryBackground","category-bg"]])if(/^#[0-9a-f]{6}$/i.test(channel[key]||""))entry.container.style.setProperty("--"+variable,channel[key]);
-    const disabledColors=channel.muted||channel.active===false||(channel.unassigned&&!channel.monitoring);
+    entry.minimum=channel.meterMinimum??-60;entry.warning=channel.meterWarning??-20;entry.error=channel.meterError??-9;
+    for(const [name,level]of [["warning",entry.warning],["error",entry.error]])entry.container.style.setProperty("--meter-"+name,(100*(1-level/entry.minimum))+"%");
+    const magnitudeColor=channel.meterColors?.magnitudeColor;
+    if(/^#[0-9a-f]{6}$/i.test(magnitudeColor||""))entry.container.style.setProperty("--meter-magnitude",magnitudeColor);
+    const disabledColors=channel.meterDisabledColors??(channel.muted||channel.active===false||(channel.unassigned&&!channel.monitoring));
     for(const [variable,key]of [["meter-bg-green","backgroundNominalColor"],["meter-bg-yellow","backgroundWarningColor"],["meter-bg-red","backgroundErrorColor"],["meter-green","foregroundNominalColor"],["meter-yellow","foregroundWarningColor"],["meter-red","foregroundErrorColor"]]){
       const color=channel.meterColors?.[key+(disabledColors?"Disabled":"")];if(/^#[0-9a-f]{6}$/i.test(color||""))entry.container.style.setProperty("--"+variable,color);
     }
@@ -283,9 +377,21 @@ function renderMixer(channels) {
 }
 function updateLevels(levels) {
   if(!rendersPanel("mixerDock"))return;
-  for(const [uuid,values]of Object.entries(levels||{})){
+  for(const [uuid,state]of Object.entries(levels||{})){
     const entry=audioElements.get(uuid);if(!entry)continue;
-    entry.meters.querySelectorAll(".meter-peak").forEach((peak,index)=>{const db=values[index]??-100;const value=Math.max(0,Math.min(1,(db+60)/60));peak.style.setProperty("--peak-empty",(100-value*100)+"%");});
+    const values=Array.isArray(state)?state.map(peak=>({peak})):state.channels||[];
+    const position=db=>Math.max(0,Math.min(100,100*(1-(db??-100)/(state.minimum??entry.minimum??-60))));
+    entry.bars.forEach((bar,index)=>{
+      const value=values[index]||{},peak=state.clipping?100:position(value.peak);
+      bar.peak.style.setProperty("--peak-empty",(100-peak)+"%");
+      bar.peak.style.setProperty("background",state.clipping?"var(--meter-red)":"");
+      for(const [mark,db]of [[bar.hold,value.peakHold],[bar.magnitude,value.magnitude]]){
+        mark.hidden=position(db)<=0;mark.style.setProperty("--meter-position",position(db)+"%");
+      }
+      bar.hold.style.setProperty("background-color",value.peakHold>=(entry.error??-9)?"var(--meter-red)":value.peakHold>=(entry.warning??-20)?"var(--meter-yellow)":"var(--meter-green)");
+      bar.input.hidden=!!state.idle||!/^#[0-9a-f]{6}$/i.test(value.inputColor||"");
+      if(!bar.input.hidden)bar.input.style.setProperty("background-color",value.inputColor);
+    });
   }
 }
 function renderTransitions(next) {
@@ -300,9 +406,11 @@ function renderTransitions(next) {
   }
   if(panelMode)return;
   $("program-column").hidden=$("studio-controls").hidden=!next.studioMode;
+  $("studio-transition").disabled=next.studioTransitionEnabled===false;
+  $("tbar").disabled=next.tbarEnabled===false;
   $("preview-mode").textContent=next.studioMode?"Предпросмотр":"";
   $("program-title").textContent=next.programName||"";
-  const quick=next.quickTransitions||[],quickSignature=JSON.stringify([quick,next.addQuickTransition]);
+  const quick=next.quickTransitions||[],quickSignature=JSON.stringify([quick,next.addQuickTransition,next.addQuickTransitionEnabled]);
   if($("quick-transitions").dataset.signature!==quickSignature){
     $("quick-transitions").dataset.signature=quickSignature;
     const nodes=quick.map(c=>{
@@ -310,17 +418,111 @@ function renderTransitions(next) {
       row.append(button(c.text,()=>request("control.click",{id:c.id}),c.enabled),iconButton("dots","Настроить "+clean(c.text),()=>request("native.command",{id:"studio.quick.options",button:c.id}),c.enabled));
       return row;
     });
-    if(next.addQuickTransition)nodes.push(button("+ Быстрый переход",()=>request("control.click",{id:next.addQuickTransition})));
+    if(next.addQuickTransition)nodes.push(button("+ Быстрый переход",()=>request("control.click",{id:next.addQuickTransition}),next.addQuickTransitionEnabled!==false));
     $("quick-transitions").replaceChildren(...nodes);
   }
-  if(document.activeElement!==$("tbar"))$("tbar").value=next.tbar??0;
+  const tbar=$("tbar"),geometry=next.tbarGeometry;
+  if(geometry){
+    tbar.min=geometry.minimum;tbar.max=geometry.maximum;
+    tbar.style.height=geometry.height+"px";
+    const width=tbar.getBoundingClientRect().width;
+    tbar.style.setProperty("--tbar-thumb-width",(geometry.thumbWidth*width)+"px");
+    tbar.style.setProperty("--tbar-thumb-height",(geometry.thumbHeight*geometry.height)+"px");
+    tbar.dir=geometry.first>geometry.last?"rtl":"ltr";
+    tbar.style.paddingLeft=Math.max(0,(Math.min(geometry.first,geometry.last)-geometry.thumbWidth/2)*width)+"px";
+    tbar.style.paddingRight=Math.max(0,(1-Math.max(geometry.first,geometry.last)-geometry.thumbWidth/2)*width)+"px";
+  }
+  // The original TBarReleased can snap to zero while the Web input still has
+  // focus. Every gesture is native, so focus must not suppress native updates.
+  tbar.value=next.tbar??0;
+}
+function installNativeTBarInput(slider,dispatch) {
+  const keys=new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","PageUp","PageDown","Home","End"]);
+  let pointer=null,button=0,last={x:0,y:0.5};
+  const point=event=>{
+    const rect=slider.getBoundingClientRect();
+    return {x:Math.max(-1,Math.min(2,(event.clientX-rect.left)/Math.max(1,rect.width))),y:Math.max(-1,Math.min(2,(event.clientY-rect.top)/Math.max(1,rect.height)))};
+  };
+  const send=(kind,event)=>dispatch("studio.tbar.input",{kind,...last,button,control:!!event.ctrlKey,shift:!!event.shiftKey});
+  slider.addEventListener("pointerdown",event=>{
+    if(slider.disabled||pointer!==null||(event.button!==0&&event.button!==1))return;
+    event.preventDefault();slider.focus();pointer=event.pointerId;button=event.button;last=point(event);
+    slider.setPointerCapture(pointer);send("press",event);
+  });
+  slider.addEventListener("pointermove",event=>{
+    if(event.pointerId!==pointer)return;
+    event.preventDefault();last=point(event);send("move",event);
+  });
+  const release=event=>{
+    if(event.pointerId!==pointer)return;
+    event.preventDefault();const captured=pointer;pointer=null;
+    if(event.type==="pointerup")last=point(event);
+    send("release",event);if(slider.hasPointerCapture(captured))slider.releasePointerCapture(captured);slider.blur();
+  };
+  for(const name of ["pointerup","pointercancel","lostpointercapture"])slider.addEventListener(name,release);
+  slider.addEventListener("keydown",event=>{
+    if(slider.disabled||event.defaultPrevented||event.isComposing||event.altKey||event.metaKey||!keys.has(event.key))return;
+    event.preventDefault();dispatch("studio.tbar.input",{kind:"key",key:event.key,control:!!event.ctrlKey,shift:!!event.shiftKey});
+  });
+  slider.addEventListener("wheel",event=>{
+    if(slider.disabled||document.activeElement!==slider||event.altKey||event.metaKey)return;
+    const value=Math.round(Number.isFinite(event.wheelDeltaY)?event.wheelDeltaY:-event.deltaY*(event.deltaMode===1?40:event.deltaMode===2?120:1.2));
+    if(!value)return;event.preventDefault();dispatch("studio.tbar.input",{kind:"wheel",value,control:!!event.ctrlKey,shift:!!event.shiftKey});
+  },{passive:false});
 }
 function renderControls(controls) {
   const signature=JSON.stringify(controls||[]);if($("controls").dataset.signature===signature)return;
   $("controls").dataset.signature=signature;const focus=document.activeElement?.dataset.control;
-  const nodes=(controls||[]).map(control=>{const b=button(control.text,()=>request("control.click",{id:control.id}),control.enabled);b.dataset.control=control.id;if(control.checkable)b.setAttribute("aria-pressed",String(control.checked));return b;});
-  nodes.push(button("Выход",()=>request("native.command",{id:"window.close"})));$("controls").replaceChildren(...nodes);
-  if(focus)Array.from($("controls").children).find(c=>c.dataset.control===focus)?.focus({preventScroll:true});
+  const rows=new Map();
+  for(const control of controls||[]){
+    const group=control.group||control.id;
+    if(!rows.has(group)){const row=document.createElement("div");row.className="control-row";rows.set(group,row);}
+    const b=button(control.iconOnly?"":control.text,()=>request("control.click",{id:control.id}),control.enabled);
+    b.dataset.control=control.id;b.className="native-control";b.title=clean(control.tooltip||control.text);b.setAttribute("aria-label",clean(control.text));
+    b.classList.toggle("active",!!control.active);b.classList.toggle("icon-only",!!control.iconOnly);
+    if(control.checkable||control.active)b.setAttribute("aria-pressed",String(control.active||control.checked));
+    if(control.icon?.startsWith("data:image/png;base64,")){const img=document.createElement("img");img.src=control.icon;img.alt="";b.prepend(img);}
+    if(control.menu){const arrow=document.createElement("span");arrow.className="control-menu-arrow";arrow.textContent="▾";b.append(arrow);b.setAttribute("aria-haspopup","menu");}
+    for(const [field,variable]of [["background","control-background"],["foreground","control-foreground"]])if(/^#[0-9a-f]{6}$/i.test(control[field]||""))b.style.setProperty("--"+variable,control[field]);
+    rows.get(group).append(b);
+  }
+  $("controls").replaceChildren(...rows.values());
+  if(focus)Array.from($("controls").querySelectorAll("[data-control]")).find(c=>c.dataset.control===focus)?.focus({preventScroll:true});
+}
+function renderPreview(next) {
+  if(panelMode)return;
+  const controls=next.previewControls||{enabled:true},select=$("preview-scaling");
+  const options=[...(controls.options||[])];
+  if(controls.index===-1)options.push({index:-1,text:controls.placeholder});
+  const signature=JSON.stringify(options);
+  if(select.dataset.signature!==signature){select.dataset.signature=signature;select.replaceChildren(...options.map(item=>{const option=document.createElement("option");option.value=String(item.index);option.textContent=item.text;option.disabled=item.index===-1;return option;}));}
+  select.value=String(controls.index??0);
+  $("preview-percent").textContent=controls.percent||"";
+  $("preview-disabled").hidden=controls.enabled!==false;
+  $("enable-preview").textContent=clean(controls.enableText||"Включить предпросмотр");
+  $("preview-grid").classList.toggle("preview-disabled",controls.enabled===false);
+  $("zoom-in").disabled=actionEntry("actionPreviewZoomIn")?.enabled===false;
+  $("zoom-out").disabled=actionEntry("actionPreviewZoomOut")?.enabled===false;
+  for(const axis of ["x","y"]){
+    const element=$("preview-scroll-"+axis),bar=controls[axis==="x"?"previewXScrollBar":"previewYScrollBar"];
+    element.hidden=controls.enabled===false;
+    if(!bar)continue;
+    const hostExtent=axis==="x"?controls.hostHeight:controls.hostWidth;
+    const cssExtent=axis==="x"?innerHeight:innerWidth;
+    if(Number.isFinite(bar.extent)&&bar.extent>0)
+      $("preview-grid").style.setProperty("--preview-scroll-"+axis,Math.max(1,bar.extent*(hostExtent>0?cssExtent/hostExtent:1))+"px");
+    element._nativeBar=bar;
+    const extent=axis==="x"?element.clientWidth:element.clientHeight;
+    const range=bar.max-bar.min,full=range+Math.max(1,bar.page);
+    const content=Math.max(extent,Math.ceil(extent*full/Math.max(1,bar.page)));
+    element.firstElementChild.style[axis==="x"?"width":"height"]=content+"px";
+    const maximum=axis==="x"?element.scrollWidth-element.clientWidth:element.scrollHeight-element.clientHeight;
+    const value=range>0?Math.round((bar.value-bar.min)*maximum/range):0;
+    // A snapshot acknowledges native movement. Ignore only its own queued
+    // scroll event; genuine mouse/wheel/keyboard scrolling goes to OBS.
+    element._reportedScroll=value;
+    if(!element.matches(":active"))element[axis==="x"?"scrollLeft":"scrollTop"]=value;
+  }
 }
 function render(next) {
   state=next;connected=true;document.title=next.title+" — WebView2";$("connection").textContent="OBS Studio";
@@ -334,6 +536,7 @@ function render(next) {
   $("output-status").classList.toggle("live",next.recording||next.streaming);
   if(!panelMode&&!next.workspace?.nativeDocking)renderMenus(next.menus);else indexActions(next.menus);
   indexActions(next.actions);
+  renderPreview(next);
   if(rendersPanel("scenesDock")){renderToolbar("scene-toolbar",next.sceneToolbar);renderRows($("scenes"),next.scenes);}
   if(rendersPanel("sourcesDock")){renderToolbar("source-toolbar",next.sourceToolbar);renderRows($("sources"),next.sources,true);}
   const selection=next.sources.filter(s=>s.selected),selected=selection.length===1?selection[0]:null;
@@ -358,10 +561,17 @@ function renderWorkspace(next) {
   $("context-bar").hidden=preferences.toggleContextBar===false;
   document.querySelector("footer").hidden=preferences.toggleStatusBar===false;
   document.body.classList.toggle("no-source-icons",preferences.toggleSourceIcons===false);
-  $("scenes").classList.toggle("scene-grid",!!preferences.actionSceneGridMode);
+  renderSceneGrid(next);
   $("mixer").classList.toggle("vertical-mixer",!!preferences.verticalMixer);
   $("panels").hidden=!Array.from($("panels").children).some(panel=>!panel.hidden);
   $("panel-resizer").hidden=true;
+}
+function renderSceneGrid(next) {
+  const list=$("scenes"),enabled=!!next.workspace?.actionSceneGridMode;
+  list.classList.toggle("scene-grid",enabled);
+  const width=next.sceneGrid?.width>0?next.sceneGrid.width:150,height=next.sceneGrid?.height>0?next.sceneGrid.height:24;
+  list.style.gridTemplateColumns=enabled?`repeat(${Math.max(1,Math.ceil(list.clientWidth/width))},minmax(0,1fr))`:"";
+  list.style.setProperty("--scene-grid-height",height+"px");
 }
 function scheduleBounds() {
   if(panelMode)return;
@@ -374,7 +584,7 @@ function scheduleBounds() {
       return {x,y,width:Math.max(0,Math.min(innerWidth,rect.right)-x),height:Math.max(0,Math.min(innerHeight,rect.bottom)-y)};
     }).filter(rect=>rect.width&&rect.height);
     for(const target of ["preview","program"]){
-      const area=$(target),bounds=area.getBoundingClientRect(),visible=target==="preview"||state.studioMode;
+      const area=$(target),bounds=area.getBoundingClientRect(),visible=target==="preview"?state.previewControls?.enabled!==false:state.studioMode;
       const args={target,x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,viewportWidth:innerWidth,viewportHeight:innerHeight,visible,overlays,modal:$("rename-dialog").open};
       if(!bounds.width||!bounds.height){args.x=args.y=args.width=args.height=0;}
       const signature=JSON.stringify(args);if(boundsSignatures.get(target)===signature)continue;
@@ -399,16 +609,38 @@ $("transition-type").addEventListener("change",()=>request("transition.select",{
 $("transition-duration").addEventListener("change",()=>request("transition.duration",{value:Number($("transition-duration").value)}));
 $("studio-transition").addEventListener("click",()=>request("native.command",{id:"studio.transition"}));
 $("studio-config").addEventListener("click",()=>request("native.command",{id:"studio.options"}));
+installNativeTBarInput($("tbar"),request);
 $("tbar").addEventListener("input",()=>request("studio.tbar",{value:Number($("tbar").value)}));
-$("tbar").addEventListener("change",()=>request("studio.tbar",{value:Number($("tbar").value),release:true}));
 $("zoom-in").addEventListener("click",()=>invokeName("actionPreviewZoomIn"));$("zoom-out").addEventListener("click",()=>invokeName("actionPreviewZoomOut"));
-$("preview-scaling").addEventListener("change",()=>invokeName($("preview-scaling").value));
+$("preview-scaling").addEventListener("change",()=>request("preview.scale",{index:Number($("preview-scaling").value)}));
+$("enable-preview").addEventListener("click",()=>request("preview.enable"));
+$("preview-disabled").addEventListener("contextmenu",event=>{event.preventDefault();request("preview.context");});
+for(const axis of ["x","y"]){
+  const element=$("preview-scroll-"+axis);
+  element.addEventListener("scroll",()=>{
+    const bar=element._nativeBar;if(!bar||bar.max<=bar.min)return;
+    const value=axis==="x"?element.scrollLeft:element.scrollTop;
+    if(Math.abs(value-element._reportedScroll)<1)return;
+    const maximum=axis==="x"?element.scrollWidth-element.clientWidth:element.scrollHeight-element.clientHeight;
+    if(maximum<=0)return;element._reportedScroll=value;
+    request("preview.scroll",{axis,value:Math.round(bar.min+value*(bar.max-bar.min)/maximum)});
+  });
+}
 $("rename-dialog").addEventListener("close",()=>{scheduleBounds();if($("rename-dialog").returnValue!=="ok"||!renameTarget)return;
   const {kind,row}=renameTarget;renameTarget=null;
   request(kind+".rename",{...(kind==="source"?sourceArgs(row):{uuid:row.uuid}),name:$("rename-value").value});
 });
-$("scenes").addEventListener("contextmenu",event=>{if(!event.target.closest(".row"))showContext(event,[actionEntry("actionAddScene")].filter(Boolean));});
-$("sources").addEventListener("contextmenu",event=>{if(!event.target.closest(".row"))showContext(event,[actionEntry("actionAddSource"),actionEntry("actionPasteRef"),{text:"Добавить группу",callback:()=>request("native.command",{id:"source.addGroup"})}].filter(Boolean));});
+for(const [id,sources]of [["scenes",false],["sources",true]]){
+  const element=$(id);
+  element.addEventListener("contextmenu",event=>{if(event.target.closest(".row"))return;event.preventDefault();closeMenus();request("native.command",{id:sources?"source.context":"scene.context",empty:true,scene:state.currentScene});});
+  element.addEventListener("dragover",event=>{if(dragged?.sources===sources&&!event.target.closest(".row"))event.preventDefault();});
+  element.addEventListener("drop",async event=>{
+    if(event.target.closest(".row")||!dragged||dragged.sources!==sources)return;
+    event.preventDefault();const from=dragged;dragged=null;
+    if(sources){if(from.scene!==state.currentScene)return;if(!state.sources.find(row=>keyOf(row)===keyOf(from.row))?.selected)await selectSource(from.row,{});request("source.move",{...sourceArgs(from.row),position:"end"});}
+    else{await request("scene.select",{uuid:from.row.uuid});request("scene.move",{uuid:from.row.uuid,position:"end"});}
+  });
+}
 document.addEventListener("click",event=>{if(!event.target.closest(".menu,.context-menu,.audio-controls,.row"))closeMenus();});
 document.addEventListener("keydown",event=>{
   if(event.defaultPrevented||event.isComposing||event.getModifierState?.("AltGraph"))return;
@@ -433,7 +665,10 @@ const resizer=$("panel-resizer");resizer.hidden=true;
 function resetPanelLayout(){if(state)renderWorkspace(state);scheduleBounds();}
 document.addEventListener("toggle",scheduleBounds,true);
 new ResizeObserver(scheduleBounds).observe($("preview"));new ResizeObserver(scheduleBounds).observe($("program"));
+new ResizeObserver(()=>{if(state)renderSceneGrid(state);}).observe($("scenes"));
 window.addEventListener("resize",scheduleBounds);window.addEventListener("pagehide",()=>bridge?.dispose());
 try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",updateLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignatures.clear();scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel","native-dock-panel");if(state)renderWorkspace(state);});}
 catch(error){showError(error);$("connection").textContent="Нет соединения с OBS";}
+if(bridge)bridge.subscribe("workspace.rename",data=>{if((data?.kind==="source"&&panelMode==="sourcesDock")||(data?.kind==="scene"&&panelMode==="scenesDock")){const rows=data.kind==="source"?state?.sources:state?.scenes;const row=rows?.find(row=>data.kind==="source"?keyOf(row)===keyOf(data.row):row.uuid===data.row?.uuid);if(row)rename(data.kind,row);}});
+if(bridge)bridge.subscribe("workspace.rename.finished",finishNativeRename);
 if(bridge)installExternalDrop(document,{onError:showError});

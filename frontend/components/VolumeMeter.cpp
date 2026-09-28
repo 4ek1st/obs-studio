@@ -6,6 +6,7 @@
 #include <QPainter>
 #include <QStyleOption>
 #include <QTimer>
+#include <QThread>
 
 #include "moc_VolumeMeter.cpp"
 
@@ -505,6 +506,7 @@ inline void VolumeMeter::doLayout()
 
 inline bool VolumeMeter::detectIdle(uint64_t ts)
 {
+	QMutexLocker locker(&dataMutex);
 	double secondsSinceLastUpdate = (ts - currentLastUpdateTime) * 0.000000001;
 	if (secondsSinceLastUpdate > 0.5) {
 		resetLevels();
@@ -742,12 +744,49 @@ inline int VolumeMeter::convertToInt(float number)
 	}
 }
 
-void VolumeMeter::paintEvent(QPaintEvent *)
+VolumeMeter::DisplayState VolumeMeter::displayState()
 {
+	if (QThread::currentThread() != thread())
+		return {};
+	if (needLayoutChange())
+		doLayout();
 	uint64_t ts = os_gettime_ns();
 	qreal timeSinceLastRedraw = (ts - lastRedrawTime) * 0.000000001;
 	calculateBallistics(ts, timeSinceLastRedraw);
 	bool idle = detectIdle(ts);
+	lastRedrawTime = ts;
+	DisplayState state;
+	state.channelCount = displayNrAudioChannels;
+	state.thickness = meterThickness;
+	state.idle = idle;
+	state.disabledColors = muted || useDisabledColors;
+	state.background = state.disabledColors
+		? std::array<QColor, 3>{backgroundNominalColorDisabled, backgroundWarningColorDisabled, backgroundErrorColorDisabled}
+		: std::array<QColor, 3>{backgroundNominalColor, backgroundWarningColor, backgroundErrorColor};
+	state.foreground = state.disabledColors
+		? std::array<QColor, 3>{foregroundNominalColorDisabled, foregroundWarningColorDisabled, foregroundErrorColorDisabled}
+		: std::array<QColor, 3>{foregroundNominalColor, foregroundWarningColor, foregroundErrorColor};
+	state.minimum = minimumLevel;
+	state.warning = warningLevel;
+	state.error = errorLevel;
+	QMutexLocker locker(&dataMutex);
+	for (int channel = 0; channel < displayNrAudioChannels; ++channel) {
+		const int nativeChannel = (displayNrAudioChannels == 1 && channels > 2) ? 2 : channel;
+		state.channels[channel] = {displayPeak[nativeChannel], displayPeakHold[nativeChannel],
+					   displayMagnitude[nativeChannel], displayInputPeakHold[nativeChannel],
+					   getPeakColor(displayInputPeakHold[nativeChannel])};
+		if (!clipping && displayPeak[nativeChannel] >= clipLevel) {
+			QTimer::singleShot(CLIP_FLASH_DURATION_MS, this, [this]() { clipping = false; });
+			clipping = true;
+		}
+	}
+	state.clipping = clipping;
+	return state;
+}
+
+void VolumeMeter::paintEvent(QPaintEvent *)
+{
+	const DisplayState state = displayState();
 
 	QPainter painter(this);
 
@@ -774,19 +813,16 @@ void VolumeMeter::paintEvent(QPaintEvent *)
 	int warningLength = nominalLength + (errorPosition - warningPosition);
 
 	for (int channelNr = 0; channelNr < displayNrAudioChannels; channelNr++) {
-		int channelNrFixed = (displayNrAudioChannels == 1 && channels > 2) ? 2 : channelNr;
-
-		QMutexLocker locker(&dataMutex);
-		float peak = displayPeak[channelNrFixed];
-		float peakHold = displayPeakHold[channelNrFixed];
-		float magnitude = displayMagnitude[channelNrFixed];
+		const auto &channel = state.channels[channelNr];
+		float peak = channel.peak;
+		float peakHold = channel.peakHold;
+		float magnitude = channel.magnitude;
 
 		int peakPosition = meterLength - convertToInt(peak * scale);
 		int peakHoldPosition = meterLength - convertToInt(peakHold * scale);
 		int magnitudePosition = meterLength - convertToInt(magnitude * scale);
-		locker.unlock();
 
-		if (clipping) {
+		if (state.clipping) {
 			peakPosition = meterLength;
 		}
 
@@ -802,11 +838,6 @@ void VolumeMeter::paintEvent(QPaintEvent *)
 
 		// Draw audio meter peak bars
 		if (peakPosition >= clipPosition) {
-			if (!clipping) {
-				QTimer::singleShot(CLIP_FLASH_DURATION_MS, this, [&]() { clipping = false; });
-				clipping = true;
-			}
-
 			fill(channelOffset, meterLength, error);
 		} else {
 			if (peakPosition > errorPosition) {
@@ -849,21 +880,20 @@ void VolumeMeter::paintEvent(QPaintEvent *)
 			}
 		}
 
-		if (idle) {
+		if (state.idle) {
 			continue;
 		}
 
 		// Draw audio input indicator
 		if (vertical) {
 			painter.fillRect(channelOffset, rect().height(), meterThickness, -INDICATOR_THICKNESS,
-					 getPeakColor(displayInputPeakHold[channelNrFixed]));
+					 channel.inputColor);
 		} else {
 			painter.fillRect(0, channelOffset, INDICATOR_THICKNESS, meterThickness,
-					 getPeakColor(displayInputPeakHold[channelNrFixed]));
+					 channel.inputColor);
 		}
 	}
 
-	lastRedrawTime = ts;
 }
 
 void VolumeMeter::resizeEvent(QResizeEvent *event)

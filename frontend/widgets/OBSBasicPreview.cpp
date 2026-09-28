@@ -2877,7 +2877,7 @@ void OBSBasicPreview::UpdateXScrollBar(float cx)
 
 	OBSBasic *main = OBSBasic::Get();
 
-	if (!main->ui->previewXScrollBar->isVisible()) {
+	if (!main->ui->previewXScrollBar->isVisible() && !main->property("webview2NativeDocking").toBool()) {
 		return;
 	}
 
@@ -2898,7 +2898,7 @@ void OBSBasicPreview::UpdateYScrollBar(float cy)
 
 	OBSBasic *main = OBSBasic::Get();
 
-	if (!main->ui->previewYScrollBar->isVisible()) {
+	if (!main->ui->previewYScrollBar->isVisible() && !main->property("webview2NativeDocking").toBool()) {
 		return;
 	}
 

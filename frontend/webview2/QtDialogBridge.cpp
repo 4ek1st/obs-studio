@@ -49,12 +49,14 @@
 #include <QSpinBox>
 #include <QStyleOptionButton>
 #include <QStyleOptionFrame>
+#include <QStyleOptionGroupBox>
 #include <QStyleOptionSlider>
 #include <QTabBar>
 #include <QTableView>
 #include <QTextDocument>
 #include <QTextCursor>
 #include <QTextEdit>
+#include <QTextBrowser>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeView>
@@ -301,6 +303,30 @@ struct QtDialogBridge::Impl {
 		}, paintRect));
 	}
 
+	void lineEditDecoration(QLineEdit *edit, QJsonObject &data)
+	{
+		// QSS can leave Base black even when PE_PanelLineEdit paints a different
+		// background. Paint only the panel: field contents stay editable HTML and
+		// password text is never included in a native raster.
+		QStyleOptionFrame option;
+		option.initFrom(edit); option.rect = edit->contentsRect();
+		option.lineWidth = edit->hasFrame() ? edit->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, &option, edit) : 0;
+		option.midLineWidth = 0; option.state |= QStyle::State_Sunken;
+		if (edit->isReadOnly()) option.state |= QStyle::State_ReadOnly;
+		auto contents = edit->style()->subElementRect(QStyle::SE_LineEditContents, &option, edit);
+		const auto margins = edit->textMargins();
+		// QLineEdit adds two logical horizontal pixels inside the style's content
+		// rectangle, in addition to application-provided text margins.
+		contents.adjust(margins.left() + 2, margins.top(), -margins.right() - 2, -margins.bottom());
+		data.insert("textRect", rectangle(contents));
+		data.insert("alignment", int(QStyle::visualAlignment(edit->layoutDirection(), edit->alignment())));
+		const auto paintRect = visibleRectangle(edit, dialog).translated(-edit->mapTo(dialog, QPoint()));
+		data.insert("decorationRect", rectangle(paintRect));
+		data.insert("decoration", raster(edit, QStringLiteral("lineEdit"), [&](QPainter &painter) {
+			edit->style()->drawPrimitive(QStyle::PE_PanelLineEdit, &option, &painter, edit);
+		}, paintRect));
+	}
+
 	QString identify(QWidget *widget)
 	{
 		const auto previous = widgetIds.value(widget);
@@ -424,7 +450,9 @@ struct QtDialogBridge::Impl {
 			data.insert("headerRect", rectangle(QRect(header->mapTo(view, QPoint()), header->size())));
 			for (int col = 0; col < header->count(); ++col) {
 				if (header->isSectionHidden(col)) continue;
+				const auto alignment = model->headerData(col, Qt::Horizontal, Qt::TextAlignmentRole);
 				columns.append(QJsonObject{{"index", col}, {"text", model->headerData(col, Qt::Horizontal).toString()},
+					{"alignment", alignment.isValid() ? alignment.toInt() : int(header->defaultAlignment())},
 					{"x", header->sectionViewportPosition(col)}, {"width", header->sectionSize(col)}});
 			}
 		}
@@ -447,7 +475,10 @@ struct QtDialogBridge::Impl {
 			bool atomic = true;
 			if (auto *view = owningView(widget)) data.insert("itemView", identify(view));
 			if (widget->inherits("SourceSelectButton") || widget->inherits("OBSHotkeyLabel") || widget->inherits("BalanceSlider") ||
-			    widget->inherits("AbsoluteSlider")) {
+			    widget->inherits("AbsoluteSlider") || widget->inherits("ClickableLabel") ||
+			    widget->inherits("OBS::SpinBox") || widget->inherits("OBS::DoubleSpinBox") ||
+			    qobject_cast<QTextBrowser *>(widget) ||
+			    (qobject_cast<QAbstractSpinBox *>(widget) && !qobject_cast<QSpinBox *>(widget) && !qobject_cast<QDoubleSpinBox *>(widget))) {
 				// These controls have custom paint/drag/click contracts beyond their Qt base class.
 				data.insert("type", "native");
 			} else if (auto *button = qobject_cast<QAbstractButton *>(widget)) {
@@ -463,6 +494,16 @@ struct QtDialogBridge::Impl {
 			} else if (auto *combo = qobject_cast<QComboBox *>(widget)) {
 				data.insert("type", "combo"); data.insert("index", combo->currentIndex());
 				data.insert("editable", combo->isEditable()); data.insert("value", combo->currentText());
+				data.insert("placeholder", combo->placeholderText());
+				QStyleOptionComboBox option; option.initFrom(combo);
+				option.editable = combo->isEditable(); option.frame = combo->hasFrame();
+				option.currentText = combo->currentText(); option.currentIcon = combo->itemIcon(combo->currentIndex()); option.iconSize = combo->iconSize();
+				data.insert("textRect", rectangle(combo->style()->subControlRect(QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, combo)));
+				data.insert("nativeTextWidth", QFontMetricsF(combo->font()).horizontalAdvance(combo->currentIndex() < 0 ? combo->placeholderText() : combo->currentText()));
+				if (const auto *edit = combo->lineEdit()) {
+					data.insert("readOnly", edit->isReadOnly()); data.insert("maxLength", edit->maxLength());
+					data.insert("placeholder", edit->placeholderText());
+				}
 				QJsonArray choices;
 				for (int i = 0; i < combo->count(); ++i) choices.append(QJsonObject{{"text", combo->itemText(i)},
 					{"enabled", bool(combo->model()->index(i, combo->modelColumn(), combo->rootModelIndex()).flags() & Qt::ItemIsEnabled)}});
@@ -484,6 +525,7 @@ struct QtDialogBridge::Impl {
 					data.insert("placeholder", edit->placeholderText()); data.insert("readOnly", edit->isReadOnly());
 					data.insert("maxLength", edit->maxLength());
 					data.insert("selectionStart", edit->selectionStart()); data.insert("selectionLength", edit->selectedText().size());
+					lineEditDecoration(edit, data);
 				}
 			} else if (auto *edit = qobject_cast<QTextEdit *>(widget)) {
 				data.insert("type", "multiline"); data.insert("value", edit->toPlainText());
@@ -496,8 +538,22 @@ struct QtDialogBridge::Impl {
 				data.insert("text", plainText(label->text()));
 				data.insert("wordWrap", label->wordWrap());
 				data.insert("alignment", int(label->alignment()));
+				if (!label->wordWrap() && !label->text().contains(QLatin1Char('<'))) {
+					const int margin = label->margin();
+					data.insert("textRect", rectangle(label->contentsRect().adjusted(margin, margin, -margin, -margin)));
+					data.insert("nativeTextWidth", QFontMetricsF(label->font()).horizontalAdvance(plainText(label->text())));
+				}
 				widgetDecoration(label, data);
-				if (label->text().isEmpty() && !label->pixmap().isNull()) data.insert("icon", icon(QIcon(label->pixmap())));
+				if (label->text().isEmpty() && !label->pixmap().isNull()) {
+					const auto paintRect = clipped.translated(-label->mapTo(dialog, QPoint()));
+					data.insert("iconRect", rectangle(paintRect));
+					data.insert("icon", raster(label, QStringLiteral("pixmap"), [&](QPainter &painter) {
+						const int margin = label->margin();
+						const auto area = label->contentsRect().adjusted(margin, margin, -margin, -margin);
+						if (label->hasScaledContents()) painter.drawPixmap(area, label->pixmap());
+						else label->style()->drawItemPixmap(&painter, area, int(label->alignment()), label->pixmap());
+					}, paintRect));
+				}
 			} else if (auto *bar = qobject_cast<QTabBar *>(widget)) {
 				data.insert("type", "tabs"); data.insert("index", bar->currentIndex());
 				QJsonArray tabs;
@@ -531,6 +587,20 @@ struct QtDialogBridge::Impl {
 			} else if (auto *group = qobject_cast<QGroupBox *>(widget)) {
 				data.insert("type", "group"); data.insert("text", buttonText(group->title())); data.insert("checkable", group->isCheckable());
 				data.insert("checked", group->isChecked()); atomic = false;
+				// Preserve QSS group backgrounds, title spacing and the native
+				// check indicator. Render only this widget, never its child fields.
+				const auto paintRect = visibleRectangle(group, dialog).translated(-group->mapTo(dialog, QPoint()));
+				data.insert("decorationRect", rectangle(paintRect));
+				data.insert("decoration", raster(group, QStringLiteral("group"), [&](QPainter &painter) {
+					group->render(&painter, QPoint(), QRegion(), QWidget::DrawWindowBackground);
+				}, paintRect));
+				QStyleOptionGroupBox option; option.initFrom(group); option.text = group->title();
+				option.textAlignment = group->alignment(); option.lineWidth = 1;
+				option.subControls = QStyle::SC_GroupBoxFrame | QStyle::SC_GroupBoxLabel;
+				if (group->isCheckable()) option.subControls |= QStyle::SC_GroupBoxCheckBox;
+				const auto label = group->style()->subControlRect(QStyle::CC_GroupBox, &option, QStyle::SC_GroupBoxLabel, group);
+				const auto indicator = group->isCheckable() ? group->style()->subControlRect(QStyle::CC_GroupBox, &option, QStyle::SC_GroupBoxCheckBox, group) : QRect();
+				data.insert("titleRect", rectangle(label.united(indicator)));
 			} else if (auto *progress = qobject_cast<QProgressBar *>(widget)) {
 				data.insert("type", "progress"); data.insert("minimum", progress->minimum()); data.insert("maximum", progress->maximum());
 				data.insert("value", progress->value()); data.insert("text", progress->text());
@@ -583,7 +653,23 @@ QJsonObject QtDialogBridge::snapshot()
 	const auto title = impl->dialog->windowTitle().isEmpty() ? impl->dialog->window()->windowTitle() : impl->dialog->windowTitle();
 	return {{"title", title}, {"width", impl->dialog->width()}, {"height", impl->dialog->height()},
 		{"focus", impl->widgetIds.value(impl->dialog->focusWidget())},
+		{"acceptDrops", impl->dialog->acceptDrops()},
 		{"enabled", impl->dialog->isEnabled()}, {"nodes", nodes}, {"theme", theme}, {"closed", !impl->dialog->isVisible()}};
+}
+
+bool QtDialogBridge::drop(const ExternalDropData &data, QString &error)
+{
+	error.clear();
+	const QPointer<QWidget> target(impl->dialog);
+	if (!target || !target->isVisible() || !target->isEnabled() || !target->acceptDrops()) {
+		error = QStringLiteral("This dialog is not accepting dropped items."); return false;
+	}
+	if (QApplication::activeModalWidget() && QApplication::activeModalWidget() != target->window()) {
+		error = QStringLiteral("Complete the active dialog first."); return false;
+	}
+	const bool delivered = DispatchExternalDrop(target, data);
+	if (!delivered) error = QStringLiteral("This dialog did not accept the dropped items.");
+	return delivered;
 }
 
 bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QString &error)
@@ -597,6 +683,10 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 	if (command == "dialog.key" && !args.contains("id")) widget = dialog.data();
 	if (!widget || (widget != dialog && !dialog->isAncestorOf(widget)) || !widget->isVisibleTo(dialog) || !widget->isEnabled())
 		return reject("Control is no longer available");
+	if (command == "dialog.selection" || command == "dialog.context") {
+		if (auto *combo = qobject_cast<QComboBox *>(widget); combo && combo->isEditable() && combo->lineEdit())
+			widget = combo->lineEdit();
+	}
 	if (command == "dialog.click") {
 		if (auto *button = qobject_cast<QAbstractButton *>(widget)) { button->click(); return true; }
 		if (auto *group = qobject_cast<QGroupBox *>(widget); group && group->isCheckable()) {
@@ -608,13 +698,14 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 		return reject("Control has no menu");
 	} else if (command == "dialog.input") {
 		const auto value = args.value("value");
-		if (auto *edit = qobject_cast<QLineEdit *>(widget)) {
+		auto enterText = [&](QLineEdit *edit) {
 			if (edit->isReadOnly() || !value.isString() || value.toString().size() > edit->maxLength()) return reject("Invalid text input");
 			QString proposed = value.toString(); int position = proposed.size();
 			if (edit->validator() && edit->validator()->validate(proposed, position) == QValidator::Invalid) return reject("Invalid text input");
 			if (edit->text() != proposed) { edit->selectAll(); edit->insert(proposed); }
 			return true;
-		}
+		};
+		if (auto *edit = qobject_cast<QLineEdit *>(widget)) return enterText(edit);
 		if (auto *edit = qobject_cast<QTextEdit *>(widget)) {
 			if (edit->isReadOnly() || !value.isString()) return reject("Read only text");
 			if (edit->toPlainText() != value.toString()) {
@@ -630,10 +721,8 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 			return true;
 		}
 		if (auto *combo = qobject_cast<QComboBox *>(widget)) {
-			if (!combo->isEditable() || !value.isString()) return reject("Choice is not editable");
-			combo->setEditText(value.toString());
-			if (widget && combo->lineEdit()) emit combo->lineEdit()->textEdited(value.toString());
-			return true;
+			if (!combo->isEditable() || !combo->lineEdit()) return reject("Choice is not editable");
+			return enterText(combo->lineEdit());
 		}
 		if (!value.isDouble() || !std::isfinite(value.toDouble())) return reject("Invalid numeric input");
 		const auto number = value.toDouble();
@@ -667,13 +756,25 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 		if (auto *edit = qobject_cast<QPlainTextEdit *>(widget)) edit->setTextCursor(cursor);
 		return true;
 	} else if (command == "dialog.finish") {
-		if (owningView(widget)) {
+		if (auto *view = owningView(widget)) {
+			const QPointer<QWidget> focused(QApplication::focusWidget());
+			if (focused && (focused == widget || widget->isAncestorOf(focused))) {
+				// A delegate ignores synthetic FocusOut while its editor still owns
+				// Qt focus. Move focus to the actual browser (or view in native tests)
+				// so Qt performs its original commit/closeEditor path exactly once.
+				auto *surface = dialog->findChild<WebView2Widget *>(QStringLiteral("obsWebView2DialogSurface"), Qt::FindDirectChildrenOnly);
+				QWidget *target = surface && surface->isVisible() ? static_cast<QWidget *>(surface) : view;
+				target->setFocus(Qt::OtherFocusReason);
+				if (!widget || QApplication::focusWidget() != focused) return true;
+			}
 			QFocusEvent event(QEvent::FocusOut, Qt::OtherFocusReason);
 			QApplication::sendEvent(widget, &event); return true;
 		}
 		if (auto *edit = qobject_cast<QLineEdit *>(widget)) { if (edit->hasAcceptableInput()) emit edit->editingFinished(); return true; }
 		if (auto *spin = qobject_cast<QAbstractSpinBox *>(widget)) { spin->interpretText(); if (widget) emit spin->editingFinished(); return true; }
-		if (auto *combo = qobject_cast<QComboBox *>(widget); combo && combo->lineEdit()) { emit combo->lineEdit()->editingFinished(); return true; }
+		if (auto *combo = qobject_cast<QComboBox *>(widget); combo && combo->lineEdit()) {
+			if (combo->lineEdit()->hasAcceptableInput()) emit combo->lineEdit()->editingFinished(); return true;
+		}
 		if (auto *slider = qobject_cast<QAbstractSlider *>(widget)) { slider->setSliderDown(false); return true; }
 		return true;
 	} else if (command == "dialog.choose") {
@@ -698,7 +799,9 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 		const auto action = args.value("action").toString();
 		if (action == "toggle") {
 			if (!(index.flags() & Qt::ItemIsUserCheckable)) return reject("Item is not checkable");
-			return view->model()->setData(index, index.data(Qt::CheckStateRole).toInt() == Qt::Checked ? Qt::Unchecked : Qt::Checked, Qt::CheckStateRole);
+			const int checked = index.data(Qt::CheckStateRole).toInt();
+			const int next = index.flags() & Qt::ItemIsUserTristate ? (checked + 1) % 3 : checked == Qt::Checked ? Qt::Unchecked : Qt::Checked;
+			return view->model()->setData(index, next, Qt::CheckStateRole);
 		}
 		if (action == "expand") {
 			auto *tree = qobject_cast<QTreeView *>(view);
@@ -757,8 +860,9 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 		static const QHash<QString, int> keys{{"Enter", Qt::Key_Return}, {"Escape", Qt::Key_Escape}, {"Delete", Qt::Key_Delete},
 			{"Backspace", Qt::Key_Backspace}, {"ArrowUp", Qt::Key_Up}, {"ArrowDown", Qt::Key_Down}, {"ArrowLeft", Qt::Key_Left},
 			{"ArrowRight", Qt::Key_Right}, {"Home", Qt::Key_Home}, {"End", Qt::Key_End}, {"PageUp", Qt::Key_PageUp},
-			{"PageDown", Qt::Key_PageDown}, {"F2", Qt::Key_F2}, {" ", Qt::Key_Space}};
+			{"PageDown", Qt::Key_PageDown}, {"F2", Qt::Key_F2}, {"Tab", Qt::Key_Tab}, {" ", Qt::Key_Space}};
 		int code = keys.value(key, 0);
+		if (key == "Tab" && args.value("shift").toBool()) code = Qt::Key_Backtab;
 		if (!code && key.size() == 1) code = key.toUpper().at(0).unicode();
 		if (!code) return reject("Unsupported key");
 		QKeyEvent press(QEvent::KeyPress, code, modifiers(args), key.size() == 1 ? key : QString());
@@ -810,10 +914,22 @@ public:
 			const auto command = request.value("command").toString();
 			QString error;
 			const bool ok = command == "dialog.state" || bridge.execute(command, request.value("args").toObject(), error);
-			if (!guard || !web) return;
+			if (!guard || !dialog || !web) return;
 			QJsonObject response{{"version", 1}, {"id", request.value("id")}, {"ok", ok}};
 			if (ok) response.insert("result", QJsonObject{});
 			else response.insert("error", QJsonObject{{"code", "DialogActionRejected"}, {"message", error}});
+			web->postMessage(response);
+			publish(true);
+		});
+		connect(web, &WebView2Widget::externalDrop, this, [this](const QString &id, const OBSWeb::ExternalDropData &data) {
+			const QPointer<DialogSurface> guard(this);
+			if (!dialog || !web) return;
+			QString error;
+			const bool ok = bridge.drop(data, error);
+			if (!guard || !dialog || !web) return;
+			QJsonObject response{{"version", 1}, {"id", id}, {"ok", ok}};
+			if (ok) response.insert("result", QJsonObject{{"delivered", true}});
+			else response.insert("error", QJsonObject{{"code", "DialogDropRejected"}, {"message", error}});
 			web->postMessage(response);
 			publish(true);
 		});
@@ -956,6 +1072,13 @@ public:
 
 	bool eventFilter(QObject *object, QEvent *event) override
 	{
+		if (event->type() == QEvent::Hide) {
+			// QDialog::done/reject can destroy its platform window while retaining
+			// the QWidget and model (Remux, Scripts, browser docks). That closes the
+			// child WebView controller. Recreate only the renderer on the next Show.
+			if (auto *dialog = qobject_cast<QDialog *>(object); dialog && surfaces.contains(dialog))
+				retireSurface(dialog);
+		}
 		if (event->type() == QEvent::DynamicPropertyChange &&
 		    static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == externalSurfaceProperty) {
 			if (auto *content = qobject_cast<QWidget *>(object)) {

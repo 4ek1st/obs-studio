@@ -33,6 +33,15 @@ QJsonArray sourceRows(obs_source_t *current)
         auto *source = obs_sceneitem_get_source(item);
         auto *owner = obs_sceneitem_get_scene(item);
         OBSDataAutoRelease settings = obs_sceneitem_get_private_settings(item);
+        QString color;
+        const int colorPreset = int(obs_data_get_int(settings, "color-preset"));
+        if (colorPreset == 1) {
+            const QColor nativeColor(QString::fromUtf8(obs_data_get_string(settings, "color")));
+            if (nativeColor.isValid()) color = nativeColor.name(QColor::HexRgb) + QStringLiteral("%1").arg(nativeColor.alpha(), 2, 16, QLatin1Char('0'));
+        } else if (colorPreset >= 2 && colorPreset <= 9) {
+            static const QStringList presets{"#ff444454", "#ffff4454", "#44ff4454", "#44ffff54", "#4444ff54", "#ff44ff54", "#44444454", "#ffffff54"};
+            color = presets.at(colorPreset - 2);
+        }
         auto *basic = static_cast<OBSBasic *>(main);
         const auto type = QByteArray(obs_source_get_id(source));
         const auto icon = type == "scene" ? basic->GetSceneIcon() : type == "group" ? basic->GetGroupIcon() : basic->GetSourceIcon(type.constData());
@@ -47,6 +56,7 @@ QJsonArray sourceRows(obs_source_t *current)
             {"uuid", SourceId(source)}, {"owner", SourceId(obs_scene_get_source(owner))},
             {"name", QString::fromUtf8(obs_source_get_name(source))},
             {"icon", sourceIcons.value(icon.cacheKey())},
+            {"color", color},
             {"visible", obs_sceneitem_visible(item)}, {"locked", obs_sceneitem_locked(item)},
             {"selected", obs_sceneitem_selected(item)}, {"group", obs_sceneitem_is_group(item)},
             {"collapsed", obs_data_get_bool(settings, "collapsed")},
@@ -72,18 +82,6 @@ int sourceRow(const QJsonObject &args)
             return row;
     }
     return -1;
-}
-
-void finishGroupName()
-{
-    auto *tree = main->findChild<SourceTree *>(QStringLiteral("sources"));
-    if (!tree)
-        return;
-    for (int row = 0; row < tree->model()->rowCount(); ++row) {
-        auto *widget = tree->GetItemWidget(row);
-        if (widget && widget->IsEditing())
-            QMetaObject::invokeMethod(widget, "ExitEditMode", Qt::DirectConnection, Q_ARG(bool, true));
-    }
 }
 
 void syncProgramSurface()
@@ -429,10 +427,18 @@ void addWorkspaceState(QJsonObject &state)
     }
     state.insert("transitionControls", transitionControls);
     state.insert("quickTransitions", quick);
+    if (auto *button = main->findChild<QAbstractButton *>(QStringLiteral("studioTransition")))
+        state.insert("studioTransitionEnabled", button->isEnabled());
+    if (auto *button = main->findChild<QAbstractButton *>(QStringLiteral("studioAddQuickTransition")))
+        state.insert("addQuickTransitionEnabled", button->isEnabled());
     if (auto *button = main->findChild<QAbstractButton *>(QStringLiteral("studioAddQuickTransition")))
         state.insert("addQuickTransition", registerButton(button));
-    if (auto *tbar = main->findChild<QSlider *>(QStringLiteral("studioTBar")))
+    if (auto *tbar = main->findChild<QSlider *>(QStringLiteral("studioTBar"))) {
         state.insert("tbar", tbar->value());
+        state.insert("tbarEnabled", tbar->isEnabled());
+        if (auto *native = qobject_cast<SliderIgnoreScroll *>(tbar))
+            state.insert("tbarGeometry", OBSWeb::SliderGeometry(native));
+    }
     auto *basic = static_cast<OBSBasic *>(main);
     const auto program = basic->GetProgramSource();
     state.insert("programName", program ? QString::fromUtf8(obs_source_get_name(program)) : QString());
@@ -474,6 +480,9 @@ void addWorkspaceState(QJsonObject &state)
             preferences.insert(QLatin1String(name), action->isChecked());
     preferences.insert("verticalMixer", config_get_bool(App()->GetUserConfig(), "BasicWindow", "VerticalVolumeControl"));
     state.insert("workspace", preferences);
+    if (auto *scenes = main->findChild<QListWidget *>(QStringLiteral("scenes")))
+        state.insert("sceneGrid", QJsonObject{{"width", scenes->property("gridItemWidth").toInt()},
+                                              {"height", scenes->property("gridItemHeight").toInt()}});
     auto appearance = state.value("appearance").toObject();
     const QFontInfo font(main->font());
     appearance.insert("fontFamily", font.family());
@@ -536,6 +545,8 @@ bool executeWorkspace(const QJsonObject &message)
         return true;
     }
     if (command == QStringLiteral("transition.select")) {
+        auto *combo = main->findChild<QComboBox *>(QStringLiteral("transitions"));
+        if (!combo || !combo->isEnabled()) return invalid(QStringLiteral("Scene transitions are temporarily disabled."));
         const QString uuid = args.value("uuid").toString();
         bool found = false;
         obs_frontend_source_list list{};
@@ -561,10 +572,18 @@ bool executeWorkspace(const QJsonObject &message)
         publishState(true);
         return true;
     }
+    if (command == QStringLiteral("studio.tbar.input")) {
+        auto *slider = main->findChild<SliderIgnoreScroll *>(QStringLiteral("studioTBar"));
+        if (!obs_frontend_preview_program_mode_active() || !OBSWeb::DispatchSliderInput(slider, args))
+            return invalid(QStringLiteral("Manual transition input is not available."));
+        reply(id, QJsonObject{{"value", slider->value()}, {"dragging", slider->isSliderDown()}});
+        publishState(true);
+        return true;
+    }
     if (command == QStringLiteral("studio.tbar")) {
         auto *slider = main->findChild<QSlider *>(QStringLiteral("studioTBar"));
         const auto value = args.value("value");
-        if (!obs_frontend_preview_program_mode_active() || !slider || !value.isDouble() ||
+        if (!obs_frontend_preview_program_mode_active() || !slider || !slider->isEnabled() || !value.isDouble() ||
             value.toDouble() != value.toInt(-1) || value.toInt() < slider->minimum() || value.toInt() > slider->maximum())
             return invalid(QStringLiteral("Manual transition is not available."));
         slider->setValue(value.toInt());
@@ -574,11 +593,56 @@ bool executeWorkspace(const QJsonObject &message)
         publishState(true);
         return true;
     }
+    if (command == "source.hover") {
+        auto *tree = main->findChild<SourceTree *>(QStringLiteral("sources"));
+        const int row = sourceRow(args);
+        auto *item = tree && row >= 0 ? tree->GetItemWidget(row) : nullptr;
+        if (!item || !args.value("value").isBool()) {
+            // A queued leave may arrive after a scene switch or row removal.
+            reply(id, QJsonObject{});
+            return true;
+        }
+        if (args.value("value").toBool()) {
+            const QPoint center = item->rect().center();
+            QEnterEvent enter{QPointF(center), QPointF(item->mapTo(item->window(), center)), QPointF(item->mapToGlobal(center))};
+            QApplication::sendEvent(item, &enter);
+        } else {
+            QEvent leave(QEvent::Leave);
+            QApplication::sendEvent(item, &leave);
+        }
+        reply(id, QJsonObject{});
+        return true;
+    }
+    if (command == "scene.activate") {
+        if (!validateContext(id, args)) return true;
+        auto *scenes = main->findChild<QListWidget *>(QStringLiteral("scenes"));
+        if (!scenes || !scenes->currentItem() || args.value("uuid").toString() != SourceId(static_cast<OBSBasic *>(main)->GetCurrentSceneSource()))
+            return invalid(QStringLiteral("The activated scene is no longer selected."));
+        reply(id, QJsonObject{});
+        QMetaObject::invokeMethod(main, "on_scenes_itemDoubleClicked", Qt::DirectConnection, Q_ARG(QListWidgetItem *, scenes->currentItem()));
+        if (guard) publishState(true);
+        return true;
+    }
+    if (command == "source.selectAll") {
+        if (!validateContext(id, args)) return true;
+        auto *tree = main->findChild<SourceTree *>(QStringLiteral("sources"));
+        if (!tree || args.value("scene").toString() != SourceId(static_cast<OBSBasic *>(main)->GetCurrentSceneSource()))
+            return invalid(QStringLiteral("The scene has changed."));
+        tree->selectAll();
+        reply(id, QJsonObject{});
+        publishState(true);
+        return true;
+    }
     const bool sourceCommand = command == "source.visibility" || command == "source.lock" ||
         command == "source.expand" || command == "source.rename" || command == "source.move";
     if (sourceCommand) {
-        if (!validateContext(id, args))
+        if (!validateContext(id, args)) {
+            // HTML closes its editor after a rejected commit too. Release the
+            // original pending group transaction instead of leaving undo held.
+            if (command == "source.rename")
+                if (auto *tree = main->findChild<SourceTree *>(QStringLiteral("sources"))) tree->FinishWebViewEdits();
             return true;
+        }
         const int row = sourceRow(args);
         auto *tree = main->findChild<SourceTree *>(QStringLiteral("sources"));
         if (row < 0 || !tree)
@@ -588,19 +652,25 @@ bool executeWorkspace(const QJsonObject &message)
             return invalid(QStringLiteral("The native source control is unavailable."));
         if (command == "source.rename") {
             const auto name = args.value("name");
-            if (!name.isString() || name.toString().trimmed().isEmpty() || name.toString().size() > 170)
+            const bool save = args.value("save").toBool(true);
+            if (save && (!name.isString() || name.toString().trimmed().isEmpty() || name.toString().size() > 170)) {
+                if (auto *edit = widget->findChild<QLineEdit *>(); edit && edit->property("webview2InlineEdit").toBool()) {
+                    QMetaObject::invokeMethod(widget, "ExitEditMode", Qt::DirectConnection, Q_ARG(bool, false));
+                    if (guard) publishState(true);
+                }
                 return invalid(QStringLiteral("Enter a name between 1 and 170 characters."));
-            if (!widget->IsEditing())
+            }
+            if (save && !widget->IsEditing())
                 QMetaObject::invokeMethod(widget, "EnterEditMode", Qt::DirectConnection);
-            if (auto *edit = widget->findChild<QLineEdit *>())
-                edit->setText(name.toString().trimmed());
+            if (save)
+                if (auto *edit = widget->findChild<QLineEdit *>()) edit->setText(name.toString().trimmed());
             reply(id, QJsonObject{});
-            QMetaObject::invokeMethod(widget, "ExitEditMode", Qt::DirectConnection, Q_ARG(bool, true));
+            if (widget->IsEditing()) QMetaObject::invokeMethod(widget, "ExitEditMode", Qt::DirectConnection, Q_ARG(bool, save));
         } else if (command == "source.move") {
-            const int target = sourceRow(args.value("target").toObject());
             const QString position = args.value("position").toString();
-            const int nativePosition = position == "inside" ? 0 : position == "before" ? 1 : position == "after" ? 2 : -1;
-            if (target < 0 || nativePosition < 0 || !tree->MoveSelectedItems(target, nativePosition))
+            const int target = position == "end" ? -1 : sourceRow(args.value("target").toObject());
+            const int nativePosition = position == "inside" ? 0 : position == "before" ? 1 : position == "after" ? 2 : position == "end" ? 3 : -1;
+            if ((target < 0 && position != "end") || nativePosition < 0 || !tree->MoveSelectedItems(target, nativePosition))
                 return invalid(QStringLiteral("This source cannot be moved to the requested position."));
             reply(id, QJsonObject{});
         } else {
@@ -646,7 +716,13 @@ bool executeWorkspace(const QJsonObject &message)
                 if (SourceId(scenes.sources.array[i]) == args.value("uuid").toString()) from = int(i);
                 if (SourceId(scenes.sources.array[i]) == args.value("target").toString()) to = int(i);
             }
+            const int count = int(scenes.sources.num);
             obs_frontend_source_list_free(&scenes);
+            const QString position = args.value("position").toString();
+            if (position == "end") to = count - 1;
+            else if (position == "before" || position == "after") {
+                if (to >= 0) { const int gap = to + (position == "after" ? 1 : 0); to = gap - (from < gap ? 1 : 0); }
+            } else if (!position.isEmpty()) return invalid(QStringLiteral("Unknown scene drop position."));
             if (from < 0 || to < 0)
                 return invalid(QStringLiteral("The scene no longer exists."));
             const char *slot = to > from ? "on_actionSceneDown_triggered" : "on_actionSceneUp_triggered";
@@ -676,6 +752,11 @@ bool executeWorkspace(const QJsonObject &message)
         {"studio.transition", "TransitionClicked"}
     };
     if (nativeSlots.contains(operation)) {
+        if (operation == "studio.transition") {
+            auto *button = main->findChild<QAbstractButton *>(QStringLiteral("studioTransition"));
+            if (!obs_frontend_preview_program_mode_active() || !button || !button->isEnabled())
+                return invalid(QStringLiteral("Studio transition is temporarily disabled."));
+        }
         reply(id, QJsonObject{{"accepted", true}});
         QMetaObject::invokeMethod(main, nativeSlots.value(operation).constData(), Qt::DirectConnection);
     } else if (operation == "source.group" || operation == "source.ungroup" || operation == "source.addGroup") {
@@ -685,9 +766,9 @@ bool executeWorkspace(const QJsonObject &message)
         if (operation == "source.group") tree->GroupSelectedItems();
         else if (operation == "source.ungroup") tree->UngroupSelectedGroups();
         else tree->AddGroup();
-        // Native grouping queues its name editor and holds the undo stack until
-        // that editor commits. Queue behind it to keep that transaction balanced.
-        QTimer::singleShot(0, this, [this] { finishGroupName(); publishState(true); });
+        // SourceTree::Edit hands the original pending transaction to the visible
+        // inline editor; only its explicit finish commits grouping and naming.
+        QTimer::singleShot(0, this, [this] { publishState(true); });
     } else if (operation == "source.tools") {
         auto *area = main->findChild<QWidget *>("emptySpace");
         if (!area || !area->layout() || !area->layout()->count())
@@ -708,18 +789,23 @@ bool executeWorkspace(const QJsonObject &message)
         if (controls && area->layout()->count() == 0) placement.restore(controls);
         static_cast<OBSBasic *>(main)->UpdateContextBar(true);
     } else if (operation == "source.context") {
-        const int row = sourceRow(args);
-        if (row < 0)
+        const bool empty = args.value("empty").toBool();
+        auto itemArgs = args;
+        itemArgs.insert("id", args.value("item"));
+        const int row = empty ? -1 : sourceRow(itemArgs);
+        if ((!empty && row < 0) || (empty && args.value("scene").toString() != SourceId(static_cast<OBSBasic *>(main)->GetCurrentSceneSource())))
             return invalid(QStringLiteral("Source no longer exists."));
         reply(id, QJsonObject{});
         static_cast<OBSBasic *>(main)->CreateSourcePopupMenu(row, false);
+        if (!guard) return true;
+        QTimer::singleShot(0, this, [this] { publishState(true); });
     } else if (operation == "scene.context") {
         auto *scenes = main->findChild<QListWidget *>(QStringLiteral("scenes"));
-        if (!scenes || !scenes->currentItem())
+        if (!scenes || (!args.value("empty").toBool() && !scenes->currentItem()))
             return invalid(QStringLiteral("Scene is unavailable."));
         reply(id, QJsonObject{});
         QMetaObject::invokeMethod(main, "on_scenes_customContextMenuRequested", Qt::DirectConnection,
-                                  Q_ARG(QPoint, scenes->visualItemRect(scenes->currentItem()).center()));
+                                  Q_ARG(QPoint, args.value("empty").toBool() ? QPoint(-1, -1) : scenes->visualItemRect(scenes->currentItem()).center()));
     } else if (operation == "audio.context") {
         VolumeControl *selected = nullptr;
         for (auto *control : main->findChildren<VolumeControl *>())
@@ -728,7 +814,7 @@ bool executeWorkspace(const QJsonObject &message)
         if (!selected)
             return invalid(QStringLiteral("Audio source is unavailable."));
         reply(id, QJsonObject{});
-        const QPoint point = selected->rect().center();
+        const QPoint point = selected->mapFromGlobal(QCursor::pos());
         QContextMenuEvent event(QContextMenuEvent::Mouse, point, QCursor::pos());
         QApplication::sendEvent(selected, &event);
     } else if (operation == "audio.options") {

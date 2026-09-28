@@ -57,6 +57,12 @@ public:
 	void SetIconsVisible(bool visible);
 	// Shared drag/reorder path for native and WebView2 source lists.
 	bool MoveSelectedItems(int row, int position);
+	// Finish only editors handed to the WebView source list. Native editing is
+	// unchanged; the original ExitEditMode owns the grouping undo transaction.
+	void FinishWebViewEdits();
+
+signals:
+	void WebViewEditFinished();
 
 public slots:
 	inline void ReorderItems() { GetStm()->ReorderItems(); }

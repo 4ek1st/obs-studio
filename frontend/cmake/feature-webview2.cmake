@@ -23,7 +23,8 @@ target_sources(
     webview2/WebView2Widget.hpp
 )
 target_link_libraries(obs-studio PRIVATE OBS::WebView2)
-set_property(SOURCE widgets/OBSBasic.cpp APPEND PROPERTY COMPILE_DEFINITIONS WEBVIEW2_AVAILABLE)
+set_property(SOURCE widgets/OBSBasic.cpp widgets/OBSBasic_Scenes.cpp components/SourceTree.cpp
+  APPEND PROPERTY COMPILE_DEFINITIONS WEBVIEW2_AVAILABLE)
 target_sources(obs-studio PRIVATE webview2/OBSWebView2.cpp webview2/OBSWebView2.hpp)
 foreach(resource IN ITEMS index.html app.js style.css bridge.mjs dialog.html dialog.js dialog.css external-drop.mjs)
   target_add_resource(obs-studio "${CMAKE_CURRENT_SOURCE_DIR}/webview2/ui/${resource}" "${OBS_DATA_DESTINATION}/obs-studio/webview2")

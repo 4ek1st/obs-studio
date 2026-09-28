@@ -7,6 +7,7 @@
 class QWidget;
 
 namespace OBSWeb {
+struct ExternalDropData;
 // Adapts live Qt widgets in a dialog or floating dock content. Native ownership is retained.
 class QtDialogBridge : public QObject {
 public:
@@ -14,6 +15,8 @@ public:
 	~QtDialogBridge() override;
 	QJsonObject snapshot();
 	bool execute(const QString &command, const QJsonObject &args, QString &error);
+	// Native-only: file paths in this data have already been obtained from WebView file objects.
+	bool drop(const ExternalDropData &data, QString &error);
 
 private:
 	struct Impl;

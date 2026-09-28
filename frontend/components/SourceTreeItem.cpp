@@ -191,6 +191,7 @@ void SourceTreeItem::DisconnectSignals()
 
 void SourceTreeItem::Clear()
 {
+	if (editor && editor->property("webview2InlineEdit").toBool()) ExitEditMode(false);
 	DisconnectSignals();
 	sceneitem = nullptr;
 }
@@ -211,7 +212,12 @@ void SourceTreeItem::ReconnectSignals()
 		obs_scene_t *curScene = (obs_scene_t *)calldata_ptr(cd, "scene");
 
 		if (curItem == this_->sceneitem) {
-			QMetaObject::invokeMethod(this_->tree, &SourceTree::Remove, curItem, curScene);
+			// Qt stores the argument types supplied here, not the slot's types.
+			// Acquire ownership before enqueueing: a scene reset can destroy the
+			// old item widgets and their references before this GUI call runs.
+			const OBSSceneItem retainedItem = curItem;
+			const OBSScene retainedScene = curScene;
+			QMetaObject::invokeMethod(this_->tree, &SourceTree::Remove, retainedItem, retainedScene);
 			curItem = nullptr;
 		}
 		if (!curItem) {
@@ -365,13 +371,18 @@ void SourceTreeItem::EnterEditMode()
 
 void SourceTreeItem::ExitEditMode(bool save)
 {
+	// A WebView edit can end because the active scene changed. The group undo
+	// snapshot must still describe the owning scene, not the new current scene.
+	const bool webEdit = editor && editor->property("webview2InlineEdit").toBool();
+	OBSScene editedScene = webEdit ? webEditScene : nullptr;
+	webEditScene = nullptr;
 	ExitEditModeInternal(save);
 
 	if (tree->undoSceneData) {
 		OBSBasic *main = OBSBasic::Get();
 		main->undo_s.pop_disabled();
 
-		OBSData redoSceneData = main->BackupScene(GetCurrentScene());
+		OBSData redoSceneData = main->BackupScene(editedScene ? editedScene : GetCurrentScene());
 
 		QString text = QTStr("Undo.GroupItems").arg(newName.c_str());
 		main->CreateSceneUndoRedoAction(text, tree->undoSceneData, redoSceneData);
@@ -385,6 +396,7 @@ void SourceTreeItem::ExitEditModeInternal(bool save)
 	if (!editor) {
 		return;
 	}
+	const bool webEdit = editor->property("webview2InlineEdit").toBool();
 
 	OBSBasic *main = OBSBasic::Get();
 	OBSScene scene = main->GetCurrentScene();
@@ -403,7 +415,10 @@ void SourceTreeItem::ExitEditModeInternal(bool save)
 	/* ----------------------------------------- */
 	/* check for empty string                    */
 
-	if (!save) {
+	// The source removal signal clears sceneitem before resetting the model.
+	// A retained Web edit must cancel safely, while the outer ExitEditMode still
+	// releases its original group transaction using the retained owning scene.
+	if (!save || (webEdit && (!sceneitem || !obs_sceneitem_get_source(sceneitem)))) {
 		return;
 	}
 
@@ -466,6 +481,9 @@ bool SourceTreeItem::eventFilter(QObject *object, QEvent *event)
 	if (editor != object) {
 		return false;
 	}
+	// The visible HTML input owns focus during this edit. Its explicit commit
+	// or cancel (or SourceTree's lifecycle cleanup) finishes the native editor.
+	if (event->type() == QEvent::FocusOut && editor->property("webview2InlineEdit").toBool()) return false;
 
 	if (LineEditCanceled(event)) {
 		QMetaObject::invokeMethod(this, &SourceTreeItem::ExitEditMode, Qt::QueuedConnection, false);

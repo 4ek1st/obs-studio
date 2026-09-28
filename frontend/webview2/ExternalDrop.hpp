@@ -11,7 +11,7 @@ struct ExternalDropData {
 	QList<QUrl> urls;
 	QString text;
 };
-bool IsExternalDropOrigin(const QString &source);
+bool IsExternalDropOrigin(const QString &source, const QString &document = QStringLiteral("index.html"));
 // trustedFilePaths must originate from ICoreWebView2File, never JSON metadata.
 std::optional<ExternalDropData> ParseExternalDrop(const QJsonObject &args,
 						const QStringList &trustedFilePaths, QString &error);

@@ -9,10 +9,11 @@
 #include <QPointer>
 #include <QWidget>
 namespace OBSWeb {
-bool IsExternalDropOrigin(const QString &source)
+bool IsExternalDropOrigin(const QString &source, const QString &document)
 {
 	const QUrl url(source);
-	return IsLocalUi(url) && url.path() == QStringLiteral("/index.html") && !url.hasQuery();
+	return (document == QStringLiteral("index.html") || document == QStringLiteral("dialog.html")) &&
+	       IsLocalUi(url) && url.path() == QLatin1Char('/') + document && !url.hasQuery() && !url.hasFragment();
 }
 std::optional<ExternalDropData> ParseExternalDrop(const QJsonObject &args, const QStringList &files, QString &error)
 {
@@ -26,7 +27,7 @@ std::optional<ExternalDropData> ParseExternalDrop(const QJsonObject &args, const
 			return reject("A drop must contain between 1 and 128 native file objects.");
 		for (const auto &file : files) {
 			const QFileInfo info(file);
-			if (file.size() > 32767 || file.contains(QChar(0)) || !info.isAbsolute() || !info.isFile())
+			if (file.size() > 32767 || file.contains(QChar(0)) || !info.isAbsolute() || (!info.isFile() && !info.isDir()))
 				return reject("The dropped file is no longer available.");
 			drop.urls.append(QUrl::fromLocalFile(file));
 		}

@@ -26,10 +26,11 @@ const sandbox = {
   document: { querySelector: () => new Element(), createElement: () => new Element(),
     documentElement: new Element(), addEventListener() {} },
   addEventListener() {}, setTimeout, clearTimeout,
+  installExternalDrop() {},
   createBridge: () => ({ subscribe() {}, request: () => Promise.resolve({}) }),
 };
 vm.createContext(sandbox);
-vm.runInContext((await readFile(new URL("../../frontend/webview2/ui/dialog.js", import.meta.url), "utf8")).replace(/^import .*?;\s*/, ""), sandbox);
+vm.runInContext((await readFile(new URL("../../frontend/webview2/ui/dialog.js", import.meta.url), "utf8")).replace(/^import .*?;\s*/gm, ""), sandbox);
 const values = []; let finishes = 0;
 const bar = sandbox.createScrollbar(value => values.push(value), () => finishes++);
 sandbox.updateScrollbar(bar, { minimum: 0, maximum: 600, page: 300, step: 10, value: 0 }, true);

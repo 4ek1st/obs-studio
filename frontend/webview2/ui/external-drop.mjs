@@ -26,12 +26,12 @@ export function prepareExternalDrop(transfer) {
 
 // Capture is limited to external drags. Source/scene reorder dragstart originates
 // inside this document and must reach its existing row handlers unchanged.
-export function installExternalDrop(target, {transport = globalThis.chrome?.webview, onError = () => {}} = {}) {
+export function installExternalDrop(target, {transport = globalThis.chrome?.webview, onError = () => {}, enabled = () => true} = {}) {
   let internalDrag = false, sequence = 0;
   const session = 'drop:' + globalThis.crypto.randomUUID();
   const pending = new Map();
   const editable = event => event.target?.closest?.('input,textarea,[contenteditable="true"],dialog');
-  const eligible = event => !internalDrag && !editable(event) &&
+  const eligible = event => enabled() && !internalDrag && !editable(event) &&
     !Array.from(event.dataTransfer?.types || []).includes(internalType) && supported(Array.from(event.dataTransfer?.types || []));
   const start = () => { internalDrag = true; };
   const end = () => { internalDrag = false; };

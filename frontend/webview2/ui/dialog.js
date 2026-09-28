@@ -1,4 +1,5 @@
 import { createBridge } from "./bridge.mjs";
+import { installExternalDrop } from "./external-drop.mjs";
 
 const root = document.querySelector("#dialog");
 const errorBox = document.querySelector("#error");
@@ -10,6 +11,7 @@ let scrollAreas = [];
 let nativeSize = { width: 1, height: 1 };
 let viewportScale = { x: 1, y: 1 };
 let fontRevision = 0;
+let acceptingDrops = false;
 
 function applyViewportScale() {
   viewportScale = { x: innerWidth / nativeSize.width, y: innerHeight / nativeSize.height };
@@ -20,8 +22,10 @@ function applyViewportScale() {
 addEventListener("resize", applyViewportScale);
 document.fonts?.addEventListener("loadingdone", () => {
   ++fontRevision;
-  for (const { element: control, data } of controls.values())
+  for (const { element: control, data } of controls.values()) {
     if (data.type === "check" || data.type === "radio") fitChoiceText(control.querySelector("span"), data);
+    else if (data.type === "label" || data.type === "combo") updateControl(control, data);
+  }
 });
 
 function applyTheme(theme, style = document.documentElement.style) {
@@ -87,6 +91,7 @@ function fitChoiceText(caption, data) {
   if (caption.dataset.metrics === signature) return;
   caption.dataset.metrics = signature;
   text.style.transform = "none";
+  text.style.transformOrigin = data.alignment & 2 ? "right center" : data.alignment & 4 ? "center" : "left center";
   // Qt's hinted glyph advances can differ slightly from Chromium even with the
   // identical bundled font. Preserve a caption that fits in the native widget;
   // don't conceal a genuinely too-long label by shrinking it arbitrarily.
@@ -97,9 +102,23 @@ function fitChoiceText(caption, data) {
   }
 }
 function bindEditor(input, id, numeric = false) {
-  input.addEventListener("input", () => {
+  let composing = false, committedComposition = null;
+  const sendInput = () => {
     if (numeric && (input.value === "" || !input.validity.valid)) return;
     request("dialog.input", { id, value: numeric ? Number(input.value) : input.value });
+  };
+  input.addEventListener("compositionstart", () => { composing = true; committedComposition = null; });
+  input.addEventListener("compositionend", () => {
+    composing = false;
+    committedComposition = input.value;
+    sendInput();
+  });
+  input.addEventListener("input", event => {
+    // Qt receives committed text; the browser owns the in-progress IME preedit.
+    if (composing || event.isComposing) return;
+    const duplicateCommit = committedComposition !== null && committedComposition === input.value;
+    committedComposition = null;
+    if (!duplicateCommit) sendInput();
   });
   input.addEventListener("blur", () => {
     // Offscreen fields still need a commit. A deleted delegate may already be gone natively.
@@ -255,7 +274,7 @@ function createControl(node) {
     control = element("div", "combo");
     const select = element("select"); select.style.cssText = "width:100%;height:100%";
     control.append(select);
-    select.addEventListener("change", () => request("dialog.choose", { id, index: select.selectedIndex }));
+    select.addEventListener("change", () => request("dialog.choose", { id, index: Number(select.value) }));
     if (node.editable) {
       const input = element("input", "text");
       input.style.cssText = "position:absolute;left:1px;top:1px;width:calc(100% - 25px);height:calc(100% - 2px);border:0";
@@ -297,7 +316,9 @@ function createControl(node) {
       request("dialog.scroll", { id, value, horizontal: useHorizontal });
     }, { passive: false });
     control.addEventListener("keydown", event => {
-      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "F2", "Delete", " "].includes(event.key) || (event.ctrlKey && event.key.toLowerCase() === "a")) {
+      if (event.isComposing) return;
+      const printable = event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey;
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "F2", "Delete", " "].includes(event.key) || (event.ctrlKey && event.key.toLowerCase() === "a") || printable) {
         event.preventDefault(); event.stopPropagation();
         request("dialog.key", { id, key: event.key, ...modifiers(event) });
       }
@@ -377,6 +398,7 @@ function updateItems(control, data) {
       header.replaceChildren();
       for (const col of data.columns ?? []) {
         const button = element("button"); button.textContent = col.text;
+        button.style.textAlign = col.alignment & 4 ? "center" : col.alignment & 2 ? "right" : "left";
         button.style.left = `${col.x}px`; button.style.width = `${col.width}px`;
         button.addEventListener("click", () => request("dialog.header", { id: data.id, column: col.index }));
         header.append(button);
@@ -421,6 +443,7 @@ function updateControl(control, data) {
     control.querySelector("span").textContent = data.text;
     setIcon(control, data.icon);
     control.classList.toggle("checked", data.checkable && data.checked);
+    if (data.checkable && data.checked) control.style.color = "var(--qt-highlightedText)";
     control.classList.toggle("default", data.default);
     let arrow = control.querySelector(".menu-arrow");
     if (data.menu && !arrow) {
@@ -441,9 +464,21 @@ function updateControl(control, data) {
     fitChoiceText(caption, data);
   } else if (["text", "multiline", "number"].includes(data.type)) {
     const input = data.type === "number" ? control.querySelector("input") : control;
+    if (data.type === "text") {
+      input.type = data.password ? "password" : "text";
+      if (safeIcon(data.decoration)) {
+        applyDecoration(input, data);
+        input.style.borderRadius = "0";
+      }
+      input.style.textAlign = data.alignment & 4 ? "center" : data.alignment & 2 ? "right" : "left";
+      if (data.textRect) {
+        const text = data.textRect;
+        input.style.padding = `${Math.max(0, text.y)}px ${Math.max(0, data.rect.width - text.x - text.width)}px ${Math.max(0, data.rect.height - text.y - text.height)}px ${Math.max(0, text.x)}px`;
+      }
+    }
     setValue(input, data.value); input.readOnly = !!data.readOnly; input.disabled = !data.enabled;
     input.placeholder = data.placeholder || "";
-    if (data.maxLength) input.maxLength = data.maxLength;
+    if (data.maxLength !== undefined) input.maxLength = data.maxLength;
     if (data.type === "number") {
       input.min = data.minimum; input.max = data.maximum; input.step = data.step;
       control.querySelector(".prefix").textContent = data.prefix || "";
@@ -451,21 +486,48 @@ function updateControl(control, data) {
     }
   } else if (data.type === "combo") {
     const select = control.querySelector("select");
-    const signature = JSON.stringify(data.choices);
+    const signature = JSON.stringify([data.choices, data.placeholder]);
     if (select.dataset.signature !== signature) {
-      select.replaceChildren(...data.choices.map(choice => { const option = element("option"); option.textContent = choice.text; option.disabled = !choice.enabled; return option; }));
+      const options = data.choices.map((choice, index) => { const option = element("option"); option.textContent = choice.text; option.value = String(index); option.disabled = !choice.enabled; return option; });
+      if (data.placeholder) {
+        const placeholder = element("option"); placeholder.textContent = data.placeholder;
+        placeholder.value = "-1"; placeholder.disabled = true; placeholder.hidden = true; options.unshift(placeholder);
+      }
+      select.replaceChildren(...options);
       select.dataset.signature = signature;
     }
-    select.selectedIndex = data.index; select.disabled = !data.enabled;
+    select.value = String(data.index); select.disabled = !data.enabled;
+    // Keep the real select for its keyboard, accessibility and popup semantics;
+    // draw only its closed caption in Qt's actual edit-field rectangle.
+    let caption = control.querySelector(".combo-caption");
+    if (!data.editable && data.textRect && Number.isFinite(data.nativeTextWidth)) {
+      if (!caption) { caption = element("span", "combo-caption"); caption.setAttribute("aria-hidden", "true"); control.append(caption); }
+      select.classList.add("native-caption-select");
+      place(caption, data.textRect);
+      fitChoiceText(caption, { ...data, text: data.index < 0 ? data.placeholder || "" : data.value || "" });
+    } else { select.classList.remove("native-caption-select"); caption?.remove(); }
     const input = control.querySelector("input");
-    if (input) { setValue(input, data.value); input.disabled = !data.enabled; }
+    if (input) {
+      setValue(input, data.value); input.disabled = !data.enabled; input.readOnly = !!data.readOnly;
+      if (data.maxLength !== undefined) input.maxLength = data.maxLength;
+      input.placeholder = data.placeholder || "";
+    }
   } else if (data.type === "label") {
-    control.querySelector("span").textContent = data.text;
+    const caption = control.querySelector("span");
+    if (!data.wordWrap && data.textRect && Number.isFinite(data.nativeTextWidth)) {
+      caption.style.display = "block"; caption.style.width = "100%";
+      caption.style.textAlign = data.alignment & 4 ? "center" : data.alignment & 2 ? "right" : "left";
+      fitChoiceText(caption, data);
+    } else { caption.textContent = data.text; caption.style.display = ""; caption.style.width = ""; }
     control.classList.toggle("wrap", data.wordWrap);
     control.classList.toggle("center", !!(data.alignment & 4));
     control.classList.toggle("right", !!(data.alignment & 2));
     applyDecoration(control, data);
     setIcon(control, data.icon);
+    if (data.iconRect) {
+      const image = control.querySelector(":scope > img");
+      if (image) { image.style.position = "absolute"; place(image, data.iconRect); }
+    }
   } else if (data.type === "tabs") {
     const signature = JSON.stringify([data.tabs, data.index, data.enabled]);
     if (control.dataset.signature !== signature) {
@@ -482,7 +544,17 @@ function updateControl(control, data) {
       control.dataset.signature = signature;
     }
   } else if (data.type === "group") {
-    control.querySelector("legend > *").textContent = (data.checkable ? (data.checked ? "☑ " : "☐ ") : "") + data.text;
+    const caption = control.querySelector("legend > *");
+    caption.textContent = (data.checkable ? (data.checked ? "☑ " : "☐ ") : "") + data.text;
+    const decorated = !!safeIcon(data.decoration);
+    control.classList.toggle("native-decoration", decorated);
+    if (decorated) {
+      caption.classList.add("native-caption");
+      applyDecoration(control, data);
+      if (data.titleRect) place(control.querySelector("legend"), data.titleRect);
+      if (data.checkable) caption.setAttribute("aria-pressed", String(!!data.checked));
+      caption.disabled = !data.enabled;
+    }
   } else if (data.type === "scroll") {
     updateScrollbar(control, data, data.vertical);
   } else if (data.type === "slider") {
@@ -498,6 +570,7 @@ function updateControl(control, data) {
 }
 
 function render(state) {
+  acceptingDrops = !!state.acceptDrops && !!state.enabled && !state.closed;
   nativeSize = { width: Math.max(1, state.width || 1), height: Math.max(1, state.height || 1) };
   applyViewportScale();
   applyTheme(state.theme);
@@ -542,10 +615,16 @@ function render(state) {
 
 document.addEventListener("keydown", event => {
   if (event.isComposing) return;
+  const control = event.target.closest(".control");
+  const id = control?.dataset.id;
+  if (event.key === "Tab" && controls.get(id)?.data.itemView && event.target.matches("input,textarea,select")) {
+    // Qt delegates use Tab/Backtab to commit and move their model cell.
+    event.preventDefault(); event.stopPropagation();
+    request("dialog.key", { id, key: event.key, ...modifiers(event) });
+    return;
+  }
   if (event.key === "Escape" || (event.key === "Enter" && event.target.tagName !== "TEXTAREA" && event.target.tagName !== "BUTTON" && event.target.tagName !== "SELECT")) {
     event.preventDefault();
-    const control = event.target.closest(".control");
-    const id = control?.dataset.id;
     // Qt editors/delegates see Return/Escape before their parent dialog does.
     request("dialog.key", { ...(id ? { id } : {}), key: event.key, ...modifiers(event) });
   }
@@ -565,5 +644,6 @@ document.addEventListener("wheel", event => {
 try {
   connection = createBridge(globalThis.chrome?.webview);
   connection.subscribe("dialog.state", render);
+  installExternalDrop(document, { onError: showError, enabled: () => acceptingDrops });
   request("dialog.state");
 } catch (error) { showError(error); }

@@ -221,11 +221,132 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
     if (surface->property("webview2Ready").toBool()) QTimer::singleShot(300, this, loaded);
 }
 
+void runQueuedNativeRemovalCheck(std::function<void(bool, const char *)> check, std::function<void()> done)
+{
+    struct Fixture {
+        OBSSource previous;
+        OBSSceneAutoRelease scene{obs_scene_create("WebView queued removal lifetime")};
+        OBSSourceAutoRelease source{obs_source_create("color_source_v3", "WebView queued removal source", nullptr, nullptr)};
+        OBSWeakSource weak;
+    };
+    auto fixture = std::make_shared<Fixture>();
+    fixture->previous = static_cast<OBSBasic *>(main)->GetCurrentSceneSource();
+    fixture->weak = OBSGetWeakRef(fixture->source.Get());
+    obs_scene_add(fixture->scene, fixture->source);
+    obs_frontend_set_current_scene(obs_scene_get_source(fixture->scene));
+    QTimer::singleShot(100, this, [this, fixture, check, done] {
+        auto *tree = main->findChild<SourceTree *>("sources");
+        QPointer<SourceTreeItem> oldWidget = tree->GetItemWidget(0);
+        obs_sceneitem_t *item = obs_scene_find_source(fixture->scene, obs_source_get_name(fixture->source));
+        check(item && oldWidget, "Queued removal fixture has an actual native SourceTree item and callback");
+        if (item && oldWidget) {
+            // The real libobs callback runs off the GUI thread and queues Remove.
+            // Drop the old model/widget owners before processing that MetaCall,
+            // reproducing the Undo/Redo + scene-reset lifetime from the crash.
+            auto *worker = QThread::create([item] { obs_sceneitem_remove(item); });
+            worker->start();
+            worker->wait();
+            delete worker;
+            tree->Clear();
+            if (oldWidget) QCoreApplication::sendPostedEvents(oldWidget, QEvent::DeferredDelete);
+            fixture->source = nullptr;
+            check(!!OBSGetStrongRef(fixture->weak), "Queued native removal retains its scene item and source after old widgets are destroyed");
+        }
+        QTimer::singleShot(100, this, [this, fixture, check, done] {
+            check(!OBSGetStrongRef(fixture->weak), "Queued native removal releases its source after safe GUI delivery");
+            obs_frontend_set_current_scene(fixture->previous);
+            obs_source_remove(obs_scene_get_source(fixture->scene));
+            done();
+        });
+    });
+}
+
+void runGroupFinishCase(int mode, std::function<void(bool, const char *)> check, std::function<void()> done)
+{
+    if (mode == 4) { done(); return; }
+    struct GroupFinishFixture {
+        OBSSource previous;
+        OBSSceneAutoRelease scene;
+        OBSSourceAutoRelease a, b;
+    };
+    auto fixture = std::make_shared<GroupFinishFixture>();
+    fixture->previous = static_cast<OBSBasic *>(main)->GetCurrentSceneSource();
+    const auto suffix = QString::number(mode).toUtf8();
+    fixture->scene = obs_scene_create((QByteArray("WebView group finish ") + suffix).constData());
+    fixture->a = obs_source_create("color_source_v3", (QByteArray("WebView group finish A ") + suffix).constData(), nullptr, nullptr);
+    fixture->b = obs_source_create("color_source_v3", (QByteArray("WebView group finish B ") + suffix).constData(), nullptr, nullptr);
+    obs_scene_add(fixture->scene, fixture->a);
+    obs_scene_add(fixture->scene, fixture->b);
+    obs_frontend_set_current_scene(obs_scene_get_source(fixture->scene));
+    QTimer::singleShot(100, this, [this, fixture, mode, check, done] {
+        auto *tree = main->findChild<SourceTree *>("sources");
+        tree->selectAll();
+        execute({{"id", "group-finish-start"}, {"command", "native.command"},
+            {"args", QJsonObject{{"id", "source.group"}, {"context", snapshot().value("context")}}}});
+        QTimer::singleShot(100, this, [this, fixture, mode, check, done] {
+            auto *tree = main->findChild<SourceTree *>("sources");
+            QJsonObject group;
+            QPointer<SourceTreeItem> editorItem;
+            for (int row = 0; row < tree->model()->rowCount(); ++row)
+                if (obs_sceneitem_is_group(tree->Get(row))) editorItem = tree->GetItemWidget(row);
+            for (const auto &value : snapshot().value("sources").toArray())
+                if (value.toObject().value("group").toBool()) { group = value.toObject(); break; }
+            check(editorItem && editorItem->IsEditing(), "Lifecycle fixture retains its pending native group editor");
+            if (editorItem) {
+                auto *edit = editorItem->findChild<QLineEdit *>();
+                QFocusEvent focusOut(QEvent::FocusOut);
+                if (edit) QApplication::sendEvent(edit, &focusOut);
+                check(edit && editorItem->IsEditing(), "Moving focus to Chromium does not prematurely finalize the group undo action");
+            }
+            if (mode == 3) {
+                OBSSourceAutoRelease source = obs_get_source_by_uuid(group.value("uuid").toString().toUtf8().constData());
+                check(!!source, "Pending group source exists before external deletion");
+                if (source) obs_source_remove(source);
+            } else if (mode == 2) {
+                // Exercise native/plugin scene switching, bypassing execute()'s
+                // normal blur-before-command cleanup.
+                obs_frontend_set_current_scene(fixture->previous);
+            } else {
+                group.insert("scene", snapshot().value("currentScene"));
+                group.insert("context", snapshot().value("context"));
+                group.insert("save", mode == 0);
+                execute({{"id", "group-finish-name"}, {"command", "source.rename"}, {"args", group}});
+                check(lastTestReply.value("ok").toBool(), mode == 0 ?
+                    "Unchanged group name explicitly commits the native transaction" :
+                    "Escape explicitly finishes grouping without changing the default name");
+            }
+            QTimer::singleShot(100, this, [this, fixture, editorItem, mode, check, done] {
+                check(!editorItem || !editorItem->IsEditing(), "Group editor is finalized after commit, Escape, native scene switch or source deletion");
+                auto *basic = static_cast<OBSBasic *>(main);
+                auto undoWorked = std::make_shared<bool>(false);
+                basic->undo_s.add_action("WebView group finish balance", [undoWorked](const std::string &) { *undoWorked = true; },
+                    [](const std::string &) {}, "", "");
+                basic->undo_s.undo();
+                check(*undoWorked, mode == 0 ? "Unchanged group commit leaves undo enabled" : mode == 1 ?
+                    "Escape from group naming leaves undo enabled" : mode == 2 ?
+                    "Native scene switch during group naming leaves undo enabled" : "External group source deletion leaves undo enabled without a stale item dereference");
+                basic->undo_s.clear();
+                obs_frontend_set_current_scene(fixture->previous);
+                obs_source_remove(obs_scene_get_source(fixture->scene));
+                obs_source_remove(fixture->a);
+                obs_source_remove(fixture->b);
+                runGroupFinishCase(mode + 1, check, done);
+            });
+        });
+    });
+}
+
 void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
 {
-    done = [this, check, complete = std::move(done)] { runOverlayAndFloatingDockChecks(check, complete); };
+    done = [this, check, complete = std::move(done)] {
+        runGroupFinishCase(0, check, [this, check, complete] {
+            runQueuedNativeRemovalCheck(check, [this, check, complete] { runOverlayAndFloatingDockChecks(check, complete); });
+        });
+    };
     struct WorkspaceFixture {
         OBSSceneAutoRelease scene{obs_scene_create("WebView Workspace Editing")};
+        OBSSceneAutoRelease sceneSecond{obs_scene_create("WebView Workspace Ordering B")};
+        OBSSceneAutoRelease sceneThird{obs_scene_create("WebView Workspace Ordering C")};
         OBSSourceAutoRelease a{obs_source_create("color_source_v3", "Workspace red", nullptr, nullptr)};
         OBSSourceAutoRelease b{obs_source_create("color_source_v3", "Workspace green", nullptr, nullptr)};
         OBSSourceAutoRelease c{obs_source_create("color_source_v3", "Workspace blue", nullptr, nullptr)};
@@ -252,6 +373,66 @@ void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::func
             return QJsonObject{};
         };
         auto a = rowFor(fixture->a), b = rowFor(fixture->b), c = rowFor(fixture->c);
+        auto selectedCount = [this] {
+            int count = 0;
+            for (const auto &value : snapshot().value("sources").toArray()) count += value.toObject().value("selected").toBool();
+            return count;
+        };
+        send("source.select", c);
+        auto rangeB = b, rangeA = a;
+        rangeB.insert("range", true); rangeA.insert("range", true);
+        send("source.select", rangeB); send("source.select", rangeA);
+        check(selectedCount() == 3, "Repeated Shift navigation retains its original source-selection anchor");
+        auto focusB = b; focusB.insert("focusOnly", true);
+        send("source.select", focusB);
+        check(selectedCount() == 3, "Ctrl navigation changes native current index without replacing source selection");
+        send("source.select", c);
+        auto additiveA = a; additiveA.insert("additive", true); send("source.select", additiveA);
+        rangeB.insert("additive", true); send("source.select", rangeB);
+        check(selectedCount() == 3, "Ctrl+Shift range extends the existing noncontiguous native source selection");
+        send("source.select", a);
+        check(send("source.selectAll", {{"scene", snapshot().value("currentScene")}}) && selectedCount() == 3,
+              "Select All selects every source through the native SourceTree");
+        class HoverEvents final : public QObject {
+        public:
+            int enters = 0, leaves = 0;
+            bool eventFilter(QObject *, QEvent *event) override {
+                enters += event->type() == QEvent::Enter;
+                leaves += event->type() == QEvent::Leave;
+                return false;
+            }
+        } hoverEvents;
+        auto *sourceTree = main->findChild<SourceTree *>(QStringLiteral("sources"));
+        auto *hoverItem = sourceTree ? sourceTree->GetItemWidget(sourceRow(c)) : nullptr;
+        if (hoverItem) hoverItem->installEventFilter(&hoverEvents);
+        auto hover = c; hover.insert("value", true); send("source.hover", hover);
+        check(hoverItem && hoverEvents.enters == 1, "Source row hover reaches the original native item Enter handler");
+        hover.insert("value", false); send("source.hover", hover);
+        check(hoverItem && hoverEvents.leaves == 1, "Leaving the source row reaches the original native item Leave handler");
+        if (hoverItem) hoverItem->removeEventFilter(&hoverEvents);
+        send("source.select", c);
+        auto endDrop = c; endDrop.insert("position", "end");
+        check(send("source.move", endDrop) && snapshot().value("sources").toArray().last().toObject().value("uuid") == SourceId(fixture->c),
+              "Dropping in source viewport empty space moves the selection to the native list end");
+        static_cast<OBSBasic *>(main)->undo_s.undo();
+        const auto grid = snapshot().value("sceneGrid").toObject();
+        auto *nativeScenes = main->findChild<QListWidget *>(QStringLiteral("scenes"));
+        check(nativeScenes && grid.value("width").toInt() == nativeScenes->property("gridItemWidth").toInt() &&
+                  grid.value("height").toInt() == nativeScenes->property("gridItemHeight").toInt() && grid.value("height").toInt() > 0,
+              "Scene grid dimensions come from the original themed SceneTree");
+        const auto sceneUuid = SourceId(obs_scene_get_source(fixture->scene));
+        const auto secondUuid = SourceId(obs_scene_get_source(fixture->sceneSecond));
+        auto sceneIndex = [this](const QString &uuid) {
+            const auto list = snapshot().value("scenes").toArray();
+            for (int i = 0; i < list.size(); ++i) if (list[i].toObject().value("uuid").toString() == uuid) return i;
+            return -1;
+        };
+        check(send("scene.move", {{"uuid", sceneUuid}, {"target", secondUuid}, {"position", "after"}}) && sceneIndex(sceneUuid) == sceneIndex(secondUuid) + 1,
+              "Scene drop after a row uses native scene ordering at the requested insertion edge");
+        check(send("scene.move", {{"uuid", sceneUuid}, {"target", secondUuid}, {"position", "before"}}) && sceneIndex(secondUuid) == sceneIndex(sceneUuid) + 1,
+              "Scene drop before a row preserves the requested native insertion edge");
+        check(send("scene.move", {{"uuid", sceneUuid}, {"position", "end"}}) && sceneIndex(sceneUuid) == snapshot().value("scenes").toArray().size() - 1,
+              "Scene viewport drop reaches the native list end");
         a.insert("value", false);
         check(send("source.visibility", a) && !obs_sceneitem_visible(obs_scene_find_source(fixture->scene, obs_source_get_name(fixture->a))),
               "Source eye control changes actual scene visibility");
@@ -291,8 +472,34 @@ void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::func
                 if (auto *widget = tree->GetItemWidget(row)) editing |= widget->IsEditing();
                 grouped |= obs_sceneitem_is_group(tree->Get(row));
             }
-            check(grouped && !editing, "Grouping commits its queued native name editor");
+            check(grouped && editing, "Grouping keeps the original name transaction pending for the WebView input");
             auto *basic = static_cast<OBSBasic *>(main);
+            QJsonObject group;
+            for (const auto &value : snapshot().value("sources").toArray())
+                if (value.toObject().value("group").toBool()) { group = value.toObject(); break; }
+            group.insert("scene", snapshot().value("currentScene"));
+            group.insert("context", snapshot().value("context"));
+            group.insert("name", QStringLiteral("WebView named group undo transaction"));
+            execute({{"id", "group-name-test"}, {"command", "source.rename"}, {"args", group}});
+            check(lastTestReply.value("ok").toBool(), "Custom group name commits through the production source.rename bridge");
+            auto trigger = [this](const char *name) {
+                auto *action = main->findChild<QAction *>(QLatin1String(name));
+                if (!action) return false;
+                execute({{"id", "group-action-test"}, {"command", "action.invoke"},
+                    {"args", QJsonObject{{"id", registerAction(action)}, {"context", snapshot().value("context")}}}});
+                return lastTestReply.value("ok").toBool();
+            };
+            const bool undone = trigger("actionMainUndo");
+            bool anyGroup = false;
+            for (int row = 0; row < tree->model()->rowCount(); ++row) anyGroup |= obs_sceneitem_is_group(tree->Get(row));
+            check(undone && !anyGroup, "One native Undo ungroups the sources after entering a custom WebView group name");
+            const bool redone = trigger("actionMainRedo");
+            bool namedGroup = false;
+            for (int row = 0; row < tree->model()->rowCount(); ++row) {
+                const auto item = tree->Get(row);
+                namedGroup |= obs_sceneitem_is_group(item) && QString::fromUtf8(obs_source_get_name(obs_sceneitem_get_source(item))) == group.value("name").toString();
+            }
+            check(redone && namedGroup, "One native Redo restores grouping and its custom name together");
             bool undoWorked = false;
             basic->undo_s.add_action("WebView grouping undo balance", [&undoWorked](const std::string &) { undoWorked = true; },
                                     [](const std::string &) {}, "", "");

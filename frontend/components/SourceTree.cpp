@@ -4,6 +4,11 @@
 #include <widgets/OBSBasic.hpp>
 
 #include <QPainter>
+#include <QLineEdit>
+#include <QPointer>
+#ifdef WEBVIEW2_AVAILABLE
+#include <webview2/OBSWebView2.hpp>
+#endif
 
 #include "moc_SourceTree.cpp"
 
@@ -25,6 +30,8 @@ SourceTree::SourceTree(QWidget *parent_) : QListView(parent_)
 {
 	SourceTreeModel *stm_ = new SourceTreeModel(this);
 	setModel(stm_);
+	connect(stm_, &QAbstractItemModel::modelAboutToBeReset, this, &SourceTree::FinishWebViewEdits);
+	connect(stm_, &QAbstractItemModel::rowsAboutToBeRemoved, this, [this] { FinishWebViewEdits(); });
 	setStyleSheet(QString("*[bgColor=\"1\"]{background-color:rgba(255,68,68,33%);}"
 			      "*[bgColor=\"2\"]{background-color:rgba(255,255,68,33%);}"
 			      "*[bgColor=\"3\"]{background-color:rgba(68,255,68,33%);}"
@@ -57,6 +64,7 @@ void SourceTree::SetIconsVisible(bool visible)
 
 void SourceTree::ResetWidgets()
 {
+	FinishWebViewEdits();
 	OBSScene scene = GetCurrentScene();
 
 	SourceTreeModel *stm = GetStm();
@@ -515,8 +523,27 @@ bool SourceTree::Edit(int row)
 	}
 
 	itemWidget->EnterEditMode();
+#ifdef WEBVIEW2_AVAILABLE
+	if (BeginWebView2Rename(OBSBasic::Get(), true)) {
+		itemWidget->webEditScene = obs_sceneitem_get_scene(itemWidget->sceneitem);
+		itemWidget->editor->setProperty("webview2InlineEdit", true);
+		return true;
+	}
+#endif
 	edit(index);
 	return true;
+}
+
+void SourceTree::FinishWebViewEdits()
+{
+	QList<QPointer<SourceTreeItem>> pending;
+	for (int row = 0; row < GetStm()->items.size(); ++row) {
+		auto *item = GetItemWidget(row);
+		if (item && item->editor && item->editor->property("webview2InlineEdit").toBool()) pending.append(item);
+	}
+	for (const auto &item : pending)
+		if (item && item->editor) item->ExitEditMode(true);
+	if (!pending.isEmpty()) emit WebViewEditFinished();
 }
 
 bool SourceTree::MultipleBaseSelected() const
@@ -604,6 +631,7 @@ void SourceTree::Remove(OBSSceneItem item, OBSScene scene)
 
 void SourceTree::GroupSelectedItems()
 {
+	FinishWebViewEdits();
 	QModelIndexList indices = selectedIndexes();
 	std::sort(indices.begin(), indices.end());
 	GetStm()->GroupSelectedItems(indices);
@@ -611,12 +639,14 @@ void SourceTree::GroupSelectedItems()
 
 void SourceTree::UngroupSelectedGroups()
 {
+	FinishWebViewEdits();
 	QModelIndexList indices = selectedIndexes();
 	GetStm()->UngroupSelectedGroups(indices);
 }
 
 void SourceTree::AddGroup()
 {
+	FinishWebViewEdits();
 	GetStm()->AddGroup();
 }
 

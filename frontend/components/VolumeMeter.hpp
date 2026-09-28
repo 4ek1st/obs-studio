@@ -6,6 +6,8 @@
 #include <QPixmap>
 #include <QWidget>
 
+#include <array>
+
 #define FADER_PRECISION 4096.0
 
 class VolumeMeter : public QWidget {
@@ -137,8 +139,25 @@ private:
 	bool useDisabledColors{false};
 
 public:
+	struct DisplayChannel {
+		float peak, peakHold, magnitude, inputPeak;
+		QColor inputColor;
+	};
+	struct DisplayState {
+		std::array<DisplayChannel, MAX_AUDIO_CHANNELS> channels{};
+		std::array<QColor, 3> background, foreground;
+		int channelCount = 0, thickness = 3;
+		bool idle = true, clipping = false, disabledColors = false;
+		qreal minimum = -60.0, warning = -20.0, error = -9.0;
+	};
+
 	explicit VolumeMeter(QWidget *parent = nullptr, obs_source_t *source = nullptr);
 	~VolumeMeter();
+
+	// GUI-thread renderers share the native meter's ballistics and channel mapping.
+	// The audio callback remains owned by this widget; consumers do not attach a
+	// second meter or access its callback storage.
+	DisplayState displayState();
 
 	void setLevels(const float magnitude[MAX_AUDIO_CHANNELS], const float peak[MAX_AUDIO_CHANNELS],
 		       const float inputPeak[MAX_AUDIO_CHANNELS]);

@@ -1,6 +1,8 @@
 // Include outside OBSWebView2's class, only in the disposable integration build.
 #include <webview2/AudioMixerBridge.hpp>
 #include <components/VolumeControl.hpp>
+#include <components/VolumeMeter.hpp>
+#include <components/VolumeSlider.hpp>
 #include <widgets/OBSBasic.hpp>
 #include <webview2/WebView2Widget.hpp>
 #include <utility/platform.hpp>
@@ -16,6 +18,7 @@
 #include <QJsonDocument>
 #include <QPointer>
 #include <QTimer>
+#include <QKeyEvent>
 
 #include <cmath>
 #include <functional>
@@ -88,6 +91,61 @@ inline void RunAudioMixerIntegrationChecks(QObject *owner, const std::function<v
 	check(native != nullptr, "Audio test resolves the actual VolumeControl by source identity");
 	if (native) {
 		native->processMixerState();
+		auto *nativeMeter = native->findChild<VolumeMeter *>();
+		check(nativeMeter != nullptr, "Audio adapter consumes the actual native VolumeMeter");
+		if (nativeMeter) {
+			nativeMeter->displayState(); // Establish channel layout before the first PCM callback.
+			send("audio.volume", 1.0);
+			auto output = [&](float amplitude) {
+				std::array<float, 1024> left, right;
+				left.fill(amplitude); right.fill(amplitude * 0.5f);
+				obs_source_audio audio{};
+				audio.data[0] = reinterpret_cast<const uint8_t *>(left.data());
+				audio.data[1] = reinterpret_cast<const uint8_t *>(right.data());
+				audio.frames = uint32_t(left.size()); audio.speakers = SPEAKERS_STEREO;
+				audio.format = AUDIO_FORMAT_FLOAT_PLANAR; audio.samples_per_sec = 48000;
+				for (int block = 0; block < 8; ++block) {
+					audio.timestamp = os_gettime_ns(); obs_source_output_audio(source, &audio);
+				}
+			};
+			output(0.5f);
+			const auto live = mixer.levels().value(uuid).toObject();
+			const auto channels = live.value("channels").toArray();
+			check(channels.size() == 2 && !live.value("idle").toBool() &&
+				std::abs(channels[0].toObject().value("peak").toDouble() + 6.0206) < 0.05 &&
+				std::abs(channels[1].toObject().value("peak").toDouble() + 12.0412) < 0.05,
+				"Native PCM stereo levels reach WebView with independent left and right peaks");
+			check(channels.size() == 2 && channels[0].toObject().contains("magnitude") &&
+				channels[0].toObject().value("inputColor").toString().startsWith('#'),
+				"WebView receives the native magnitude and input-peak indicator state");
+			output(0.125f);
+			const auto decayed = mixer.levels().value(uuid).toObject().value("channels").toArray();
+			check(decayed.size() == 2 && decayed[0].toObject().value("peak").toDouble() > -18.0 &&
+				std::abs(decayed[0].toObject().value("peakHold").toDouble() + 6.0206) < 0.05,
+				"WebView uses the original native decay and held peak instead of the latest callback sample");
+			nativeMeter->setPeakMeterType(TRUE_PEAK_METER);
+			const auto truePeak = stateFor(uuid);
+			check(truePeak.value("meterWarning").toDouble() == -13.0 && truePeak.value("meterError").toDouble() == -2.0,
+				"True-peak Web meter thresholds are the actual native -13 and -2 dBTP thresholds");
+			nativeMeter->setPeakMeterType(config_get_uint(obs_frontend_get_profile_config(), "Audio", "PeakMeterType") == 1 ? TRUE_PEAK_METER : SAMPLE_PEAK_METER);
+			send("audio.volume", 0.5);
+		}
+		auto *nativeSlider = native->findChild<VolumeSlider *>();
+		if (nativeSlider) {
+			const int initial = nativeSlider->value();
+			check(mixer.execute("audio.key", {{"uuid", uuid}, {"key", "PageUp"}}, error) &&
+				nativeSlider->value() == initial + nativeSlider->pageStep(),
+				"Web fader PageUp uses the native page step");
+			const int stepped = nativeSlider->value();
+			check(mixer.execute("audio.key", {{"uuid", uuid}, {"key", "ArrowUp"}}, error) && nativeSlider->value() == stepped,
+				"Web fader preserves AbsoluteSlider's native Up-arrow suppression");
+			check(mixer.execute("audio.wheel", {{"uuid", uuid}, {"value", -120}}, error) && nativeSlider->value() < stepped,
+				"Focused Web fader wheel executes the original QSlider wheel handler");
+			check(!mixer.execute("audio.key", {{"uuid", uuid}, {"key", "F4"}}, error) &&
+				!mixer.execute("audio.wheel", {{"uuid", uuid}, {"value", 120}, {"shift", 1}}, error),
+				"Unknown fader keys and coerced wheel modifiers are rejected");
+			send("audio.volume", 0.5);
+		}
 		const auto presentation = stateFor(uuid);
 		QLabel *category = nullptr;
 		for (auto *label : native->findChildren<QLabel *>())
@@ -111,6 +169,9 @@ inline void RunAudioMixerIntegrationChecks(QObject *owner, const std::function<v
 			      presentation.value("monitorIcon").toString().startsWith("data:image/png;base64,"),
 		      "Web mixer receives native stereo geometry, theme colors and both control icons");
 		native->setLocked(true);
+		check(!mixer.execute("audio.key", {{"uuid", uuid}, {"key", "End"}}, error) &&
+			!mixer.execute("audio.wheel", {{"uuid", uuid}, {"value", 120}}, error),
+			"Native volume lock also blocks Web keyboard and wheel adjustment");
 		check(!send("audio.volume", 0.8) && obs_source_get_volume(source) == previousVolume &&
 			      !stateFor(uuid).value("volumeEnabled").toBool(),
 		      "Native volume lock also blocks Web volume changes");
@@ -249,12 +310,19 @@ inline void RunAudioMixerVisualChecks(OBSBasic *main, WebView2Widget *browser,
 				      native->isVertical() && presentation.value("active").toBool() &&
 				      presentation.value("visible").toBool() && !presentation.value("category").toString().isEmpty(),
 			      "Actual vertical mixer has a visible active native stereo channel with a localized category");
+			const auto metrics = presentation.value("verticalMetrics").toObject();
+			auto *meter = native ? native->findChild<VolumeMeter *>() : nullptr;
+			check(native && meter && metrics.value("minimumHeight").toInt() == native->minimumSizeHint().height() &&
+				metrics.value("meterMinimumHeight").toInt() == meter->minimumSizeHint().height() &&
+				metrics.value("devicePixelRatio").toDouble() == native->devicePixelRatioF() &&
+				metrics.value("buttonsHeight").toInt() > 0 && metrics.value("nameFontSize").toInt() > 0,
+				"Vertical mixer exports original channel and meter minimums, button height, font and pixel scale");
 			if (native) check(native->grab().save(QDir(artifacts).filePath("mixer-vertical-native.png")),
 					  "Original Qt vertical mixer channel is captured for visual comparison");
 			QFile manifest(QDir(artifacts).filePath("mixer-vertical.json"));
 			if (manifest.open(QIODevice::WriteOnly)) manifest.write(QJsonDocument(presentation).toJson());
 			const auto png = QDir(artifacts).filePath("mixer-vertical.png");
-			browser->capturePreview(png, [fixture, browserGuard, window, check, publish, finish, png, artifacts](bool saved) {
+			browser->capturePreview(png, [fixture, browserGuard, window, native = QPointer<VolumeControl>(native), check, publish, finish, png, artifacts](bool saved) {
 				if (fixture->completed) return;
 				if (!browserGuard || !window) { finish(); return; }
 				const QImage pixels(png);
@@ -262,8 +330,10 @@ inline void RunAudioMixerVisualChecks(OBSBasic *main, WebView2Widget *browser,
 				      "Actual OBS WebView2 mixer dock with active PCM is captured as a PNG");
 				window->resize(1280, 720);
 				publish();
-				QTimer::singleShot(700, browserGuard, [fixture, browserGuard, window, check, finish, artifacts] {
+				QTimer::singleShot(700, browserGuard, [fixture, browserGuard, window, native, check, finish, artifacts] {
 					if (fixture->completed) return;
+					check(native && native->grab().save(QDir(artifacts).filePath("mixer-vertical-compact-native.png")),
+					      "Original Qt compact channel is captured at the same dock height as WebView");
 					const auto compact = QDir(artifacts).filePath("mixer-vertical-compact.png");
 					browserGuard->capturePreview(compact, [fixture, browserGuard, window, check, finish, compact](bool saved) {
 						if (fixture->completed) return;

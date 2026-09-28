@@ -12,12 +12,14 @@ struct obs_source;
 namespace OBSWeb {
 
 namespace AudioMixerDetail {
-enum class Command { Volume, Mute, Monitor };
+enum class Command { Volume, Mute, Monitor, Key, Wheel };
 
 struct Request {
 	Command command;
 	QString uuid;
 	double value;
+	QString key;
+	int modifiers = 0;
 };
 
 std::optional<Request> ParseCommand(const QString &command, const QJsonObject &args, QString &error);

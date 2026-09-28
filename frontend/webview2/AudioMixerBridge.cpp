@@ -1,12 +1,17 @@
 #include "AudioMixerBridge.hpp"
 
 #include <components/VolumeControl.hpp>
+#include <components/VolumeMeter.hpp>
+#include <QApplication>
+#include <QKeyEvent>
+#include <QWheelEvent>
 #include <obs-frontend-api.h>
 #include <util/config-file.h>
 
 #include <QLayout>
 #include <QBuffer>
 #include <QColor>
+#include <QFontInfo>
 #include <QHash>
 #include <QLabel>
 #include <QPointer>
@@ -68,6 +73,10 @@ std::optional<Request> ParseCommand(const QString &command, const QJsonObject &a
 		kind = Command::Mute;
 	else if (command == QStringLiteral("audio.monitor"))
 		kind = Command::Monitor;
+	else if (command == QStringLiteral("audio.key"))
+		kind = Command::Key;
+	else if (command == QStringLiteral("audio.wheel"))
+		kind = Command::Wheel;
 	else {
 		error = QStringLiteral("UnknownAudioCommand");
 		return std::nullopt;
@@ -81,6 +90,25 @@ std::optional<Request> ParseCommand(const QString &command, const QJsonObject &a
 	}
 
 	const auto value = args.value(QStringLiteral("value"));
+	if (kind == Command::Key || kind == Command::Wheel) {
+		for (const auto *modifier : {"control", "shift"}) {
+			if (args.contains(modifier) && !args.value(modifier).isBool()) {
+				error = QStringLiteral("InvalidAudioValue");
+				return std::nullopt;
+			}
+		}
+		const int modifiers = (args.value("control").toBool() ? Qt::ControlModifier : 0) |
+			(args.value("shift").toBool() ? Qt::ShiftModifier : 0);
+		const auto key = args.value("key").toString();
+		if (kind == Command::Key && QStringList{"ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+			"PageUp", "PageDown", "Home", "End"}.contains(key))
+			return Request{kind, uuid, 0, key, modifiers};
+		if (kind == Command::Wheel && value.isDouble() && std::isfinite(value.toDouble()) &&
+			value.toDouble() != 0 && std::abs(value.toDouble()) <= 12000 && std::trunc(value.toDouble()) == value.toDouble())
+			return Request{kind, uuid, value.toDouble(), {}, modifiers};
+		error = QStringLiteral("InvalidAudioValue");
+		return std::nullopt;
+	}
 	if (kind == Command::Mute) {
 		if (value.isBool())
 			return Request{kind, uuid, double(value.toBool())};
@@ -189,7 +217,7 @@ struct AudioMixerBridge::Impl {
 	struct Entry {
 		QPointer<VolumeControl> control;
 		OBSWeakSource source;
-		std::unique_ptr<AudioMixerDetail::LevelMeter> meter;
+		QPointer<VolumeMeter> meter;
 	};
 	QPointer<QObject> root;
 	std::map<QString, Entry> entries;
@@ -230,11 +258,6 @@ struct AudioMixerBridge::Impl {
 				return parent->layout()->indexOf(a) < parent->layout()->indexOf(b);
 			return a->getCachedName().compare(b->getCachedName(), Qt::CaseInsensitive) < 0;
 		});
-		bool truePeak = false;
-		if (!controls.empty()) {
-			if (auto *config = obs_frontend_get_profile_config())
-				truePeak = config_get_uint(config, "Audio", "PeakMeterType") == 1;
-		}
 		std::set<QString> current;
 		order.clear();
 		for (auto *control : controls) {
@@ -249,11 +272,9 @@ struct AudioMixerBridge::Impl {
 			if (found == entries.end() || found->second.control != control ||
 			    OBSGetStrongRef(found->second.source).Get() != source.Get()) {
 				entries.erase(uuid);
-				Entry entry{control, OBSGetWeakRef(source),
-					    std::make_unique<AudioMixerDetail::LevelMeter>(source)};
+				Entry entry{control, OBSGetWeakRef(source), control->findChild<VolumeMeter *>()};
 				found = entries.emplace(uuid, std::move(entry)).first;
 			}
-			found->second.meter->setTruePeak(truePeak);
 		}
 		for (auto it = entries.begin(); it != entries.end();) {
 			if (current.find(it->first) == current.end())
@@ -284,6 +305,7 @@ QJsonArray AudioMixerBridge::snapshot()
 		const bool locked = obs_data_get_bool(settings, "volume_locked");
 		const auto &status = control->mixerStatus();
 		const double deflection = slider ? obs_fader_get_deflection(slider->fad) : 0.0;
+		const auto meter = entry.meter ? entry.meter->displayState() : VolumeMeter::DisplayState{};
 		QJsonObject channel{
 			{"uuid", uuid},
 			{"name", QString::fromUtf8(obs_source_get_name(source))},
@@ -304,9 +326,28 @@ QJsonArray AudioMixerBridge::snapshot()
 			{"preview", status.has(VolumeControl::MixerStatus::Preview)},
 			{"active", obs_source_active(source) && obs_source_audio_active(source)},
 			{"unassigned", !(obs_source_get_audio_mixers(source) & ((1 << MAX_AUDIO_MIXES) - 1))},
-			{"channels", entry.meter->channelCount()},
+			{"channels", meter.channelCount},
+			{"meterMinimum", meter.minimum},
+			{"meterWarning", meter.warning},
+			{"meterError", meter.error},
+			{"meterDisabledColors", meter.disabledColors},
+			{"meterThickness", meter.thickness},
 			{"preferredWidth", std::clamp(control->sizeHint().width(), 70, 110)},
 		};
+		QJsonObject verticalMetrics;
+		if (control->isVertical() && entry.meter) {
+			auto *name = control->firstWidget();
+			auto *nameLabel = name ? name->findChild<QLabel *>() : nullptr;
+			auto *frame = control->findChild<QWidget *>(QStringLiteral("volMeterFrame"));
+			verticalMetrics = {{"devicePixelRatio", control->devicePixelRatioF()},
+				{"minimumHeight", control->minimumSizeHint().height()},
+				{"meterMinimumHeight", entry.meter->minimumSizeHint().height()},
+				{"meterFontSize", QFontInfo(entry.meter->font()).pixelSize()},
+				{"bodyMinimumHeight", frame ? frame->minimumSizeHint().height() : entry.meter->minimumSizeHint().height()},
+				{"bottomPadding", control->contentsMargins().bottom()},
+				{"nameHeight", name ? name->minimumSizeHint().height() : 0},
+				{"nameFontSize", nameLabel ? QFontInfo(nameLabel->font()).pixelSize() : QFontInfo(control->font()).pixelSize()}};
+		}
 		// Read the native presentation, including localized status and theme icons.
 		// Do not infer a category from names or duplicate the mixer's grouping rules.
 		for (auto *label : control->findChildren<QLabel *>()) {
@@ -314,8 +355,12 @@ QJsonArray AudioMixerBridge::snapshot()
 				channel.insert("category", label->text());
 				channel.insert("categoryColor", label->palette().color(QPalette::WindowText).name());
 				channel.insert("categoryBackground", label->palette().color(QPalette::Window).name());
+				verticalMetrics.insert("categoryHeight", label->minimumSizeHint().height());
+				verticalMetrics.insert("categoryFontSize", QFontInfo(label->font()).pixelSize());
 			} else if (label->objectName() == QStringLiteral("volLabel")) {
 				channel.insert("dbText", label->text());
+				verticalMetrics.insert("dbHeight", label->minimumSizeHint().height());
+				verticalMetrics.insert("dbFontSize", QFontInfo(label->font()).pixelSize());
 			}
 		}
 		for (auto *button : control->findChildren<QPushButton *>()) {
@@ -326,6 +371,8 @@ QJsonArray AudioMixerBridge::snapshot()
 				channel.insert(prefix + "Icon", impl->iconData(button->icon()));
 				channel.insert(prefix + "Tooltip", button->toolTip());
 				channel.insert(prefix + "Enabled", button->isEnabled());
+				verticalMetrics.insert("buttonsHeight", std::max(verticalMetrics.value("buttonsHeight").toInt(), button->sizeHint().height()));
+				verticalMetrics.insert("buttonWidth", std::max(verticalMetrics.value("buttonWidth").toInt(), button->sizeHint().width()));
 			}
 		}
 		for (auto *widget : control->findChildren<QWidget *>()) {
@@ -336,14 +383,23 @@ QJsonArray AudioMixerBridge::snapshot()
 				"foregroundNominalColor", "foregroundWarningColor", "foregroundErrorColor",
 				"backgroundNominalColorDisabled", "backgroundWarningColorDisabled", "backgroundErrorColorDisabled",
 				"foregroundNominalColorDisabled", "foregroundWarningColorDisabled", "foregroundErrorColorDisabled",
-				"majorTickColor", "minorTickColor"}) {
+				"magnitudeColor", "majorTickColor", "minorTickColor"}) {
 				const auto color = widget->property(property).value<QColor>();
 				if (color.isValid())
 					colors.insert(QLatin1String(property), color.name());
 			}
+			// Native accessibility overrides are applied to the painted colors,
+			// while the Q_PROPERTY getters retain the underlying theme colors.
+			const QString suffix = meter.disabledColors ? QStringLiteral("Disabled") : QString();
+			const QStringList regions{"NominalColor", "WarningColor", "ErrorColor"};
+			for (int region = 0; region < 3; ++region) {
+				colors.insert("background" + regions[region] + suffix, meter.background[region].name());
+				colors.insert("foreground" + regions[region] + suffix, meter.foreground[region].name());
+			}
 			channel.insert("meterColors", colors);
 			break;
 		}
+		if (control->isVertical()) channel.insert("verticalMetrics", verticalMetrics);
 		QJsonArray ticks;
 		if (slider) {
 			const auto convert = obs_fader_db_to_def(slider->fad);
@@ -363,11 +419,20 @@ QJsonObject AudioMixerBridge::levels()
 	QJsonObject result;
 	for (auto it = impl->entries.begin(); it != impl->entries.end();) {
 		OBSSource source = OBSGetStrongRef(it->second.source);
-		if (!it->second.control || !IsMixerSource(source)) {
+		if (!it->second.control || !it->second.meter || !IsMixerSource(source)) {
 			it = impl->entries.erase(it);
 			continue;
 		}
-		result.insert(it->first, it->second.meter->peaks());
+		const auto state = it->second.meter->displayState();
+		QJsonArray channels;
+		for (int channel = 0; channel < state.channelCount; ++channel) {
+			const auto &value = state.channels[channel];
+			channels.append(QJsonObject{{"peak", JsonDb(value.peak)}, {"peakHold", JsonDb(value.peakHold)},
+				{"magnitude", JsonDb(value.magnitude)}, {"inputPeak", JsonDb(value.inputPeak)},
+				{"inputColor", value.inputColor.name()}});
+		}
+		result.insert(it->first, QJsonObject{{"channels", channels}, {"minimum", state.minimum},
+			{"idle", state.idle}, {"clipping", state.clipping}});
 		++it;
 	}
 	return result;
@@ -396,12 +461,27 @@ bool AudioMixerBridge::execute(const QString &command, const QJsonObject &args, 
 	}
 	bool invoked = false;
 	using AudioMixerDetail::Command;
-	if (request->command == Command::Volume) {
+	if (request->command == Command::Volume || request->command == Command::Key || request->command == Command::Wheel) {
 		auto *slider = FindSlider(control);
 		OBSDataAutoRelease settings = obs_source_get_private_settings(source);
 		if (!slider || !slider->isEnabled() || obs_data_get_bool(settings, "volume_locked")) {
 			error = QStringLiteral("VolumeLocked");
 			return false;
+		}
+		if (request->command == Command::Key) {
+			static const QHash<QString, int> keys{{"ArrowLeft", Qt::Key_Left}, {"ArrowRight", Qt::Key_Right},
+				{"ArrowUp", Qt::Key_Up}, {"ArrowDown", Qt::Key_Down}, {"PageUp", Qt::Key_PageUp},
+				{"PageDown", Qt::Key_PageDown}, {"Home", Qt::Key_Home}, {"End", Qt::Key_End}};
+			QKeyEvent event(QEvent::KeyPress, keys.value(request->key), Qt::KeyboardModifiers(request->modifiers));
+			QApplication::sendEvent(slider, &event);
+			return true;
+		}
+		if (request->command == Command::Wheel) {
+			const QPoint center = slider->rect().center();
+			QWheelEvent event(QPointF(center), QPointF(slider->mapToGlobal(center)), QPoint(),
+				QPoint(0, int(request->value)), Qt::NoButton, Qt::KeyboardModifiers(request->modifiers), Qt::NoScrollPhase, false);
+			slider->handleFrontendWheel(&event);
+			return true;
 		}
 		const int value = slider->minimum() +
 				  int(std::lround(request->value * (slider->maximum() - slider->minimum())));

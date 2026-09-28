@@ -220,9 +220,9 @@ void WebView2Widget::initialize()
 										if (request) {
 											if (request->command == QStringLiteral("external.drop")) {
 												std::optional<OBSWeb::ExternalDropData> drop;
-												if (guard->impl->document == QStringLiteral("index.html") && OBSWeb::IsExternalDropOrigin(sourceUrl))
+												if (OBSWeb::IsExternalDropOrigin(sourceUrl, guard->impl->document))
 													drop = OBSWeb::ReadExternalDrop(args, request->args, error);
-												else error = QStringLiteral("External drops are only accepted by the workspace.");
+												else error = QStringLiteral("External drop is not allowed in this document.");
 												const QString id = request->id;
 												QTimer::singleShot(0, guard.data(), [guard, drop, error, id] {
 													if (!guard || !guard->impl->loaded) return;

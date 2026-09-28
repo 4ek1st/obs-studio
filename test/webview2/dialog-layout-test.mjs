@@ -30,9 +30,10 @@ const sandbox = {
     requests.push({ name, args }); return Promise.resolve({});
   } }),
   setTimeout, clearTimeout,
+  installExternalDrop() {},
 };
 sandbox.window = sandbox;
-vm.runInNewContext((await readFile(new URL("../../frontend/webview2/ui/dialog.js", import.meta.url), "utf8")).replace(/^import .*?;\s*/, ""), sandbox);
+vm.runInNewContext((await readFile(new URL("../../frontend/webview2/ui/dialog.js", import.meta.url), "utf8")).replace(/^import .*?;\s*/gm, ""), sandbox);
 render({ width: 1280, height: 840, nodes: [{ id: "scroll", type: "scrollArea", enabled: true,
   rect: { x: 960, y: 500, width: 200, height: 300 }, clip: { x: 960, y: 500, width: 200, height: 300 } }] });
 assert.equal(root.style.width, "1280px");

@@ -51,7 +51,19 @@ void runIntegrationChecks()
 	check(obs_sceneitem_get_id(fixture->groupChild) == obs_sceneitem_get_id(fixture->itemB),
 	      "Group collision fixture uses equal IDs in different owner scenes");
 	obs_frontend_set_current_scene(obs_scene_get_source(fixture->first));
-	QTimer::singleShot(400, this, [this, fixture, check] {
+	// A fresh Chromium profile can finish navigation before its first layout
+	// message reaches Qt. Wait for that actual production event, not a fixed
+	// startup delay; the unchanged assertion below still fails after 5 seconds.
+	auto *readinessTimer = new QTimer(this);
+	readinessTimer->setInterval(25);
+	auto readinessElapsed = std::make_shared<QElapsedTimer>();
+	readinessElapsed->start();
+	connect(readinessTimer, &QTimer::timeout, this, [this, fixture, check, readinessTimer, readinessElapsed] {
+		if (!reportedPreviewGeometry && readinessElapsed->elapsed() < 5000) return;
+		readinessTimer->stop();
+		readinessTimer->deleteLater();
+		blog(LOG_INFO, "[WebView2 test] Initial viewport readiness after %lld ms: %s",
+		     static_cast<long long>(readinessElapsed->elapsed()), reportedPreviewGeometry ? "received" : "timed out");
 		auto *tree = main->findChild<SourceTree *>(QStringLiteral("sources"));
 		check(tree != nullptr, "Native SourceTree is available");
 		check(reportedPreviewGeometry, "Actual WebView2 document delivered viewport geometry");
@@ -164,16 +176,47 @@ void runIntegrationChecks()
 		check(obs_frontend_preview_program_mode_active() != beforeStudio, "Control changes actual OBS studio mode");
 		obs_frontend_set_preview_program_mode(beforeStudio);
 		const auto previousPreview = preview->geometry();
+		auto resizedCanvas = std::make_shared<QJsonObject>();
+		const auto resizedBoundsConnection = connect(browser, &WebView2Widget::messageReceived, this,
+			[resizedCanvas](const QJsonObject &message) {
+				const auto args = message.value("args").toObject();
+				if (message.value("command") == "preview.bounds" && args.value("target") == "preview")
+					*resizedCanvas = args;
+			});
 		main->resize(2048, 1136);
-		QTimer::singleShot(500, this, [this, fixture, check, previousPreview] {
+		QTimer::singleShot(500, this, [this, fixture, check, previousPreview, resizedCanvas, resizedBoundsConnection] {
+			disconnect(resizedBoundsConnection);
 			check(preview->width() > previousPreview.width(), "Native preview grows after the real WebView2 window resize");
 			const QRect browserRect = browser->geometry();
 			const QRect previewRect = preview->geometry();
 			const int leftMargin = previewRect.left() - browserRect.left();
 			const int rightMargin = browserRect.right() - previewRect.right();
-			check(browserRect.contains(previewRect) && std::abs(leftMargin - rightMargin) <= 1 &&
+			const double viewportWidth = resizedCanvas->value("viewportWidth").toDouble();
+			const double viewportHeight = resizedCanvas->value("viewportHeight").toDouble();
+			const double cssScaleX = viewportWidth > 0 ? browserRect.width() / viewportWidth : 0;
+			const double cssScaleY = viewportHeight > 0 ? browserRect.height() / viewportHeight : 0;
+			// Production #preview-grid reserves the original native scrollbar's
+			// thickness, including Fit mode. The .preview-area has 8px padding
+			// on each side. Compare margins around canvas + scrollbar, not around
+			// the canvas alone. These exact expectations also catch doubled DPI,
+			// stale viewport dimensions, wrong origins and an undersized canvas.
+			const auto nativeBar = main->findChild<QScrollBar *>(QStringLiteral("previewYScrollBar"));
+			const double scrollbarWidth = nativeBar ? nativeBar->width() : 0;
+			const double outerMargin = 8 * cssScaleX;
+			const bool matchesDeliveredCanvas = viewportWidth > 0 && viewportHeight > 0 &&
+				std::abs(leftMargin - resizedCanvas->value("x").toDouble() * cssScaleX) <= 1 &&
+				std::abs(previewRect.y() - browserRect.y() - resizedCanvas->value("y").toDouble() * cssScaleY) <= 1 &&
+				std::abs(previewRect.width() - resizedCanvas->value("width").toDouble() * cssScaleX) <= 1 &&
+				std::abs(previewRect.height() - resizedCanvas->value("height").toDouble() * cssScaleY) <= 1;
+			blog(LOG_INFO, "[WebView2 test] Resized canvas host=%dx%d CSS=%.2fx%.2f rect=%d,%d %dx%d margins=%d,%d scrollbar=%.2f",
+			     browserRect.width(), browserRect.height(), viewportWidth, viewportHeight,
+			     previewRect.x(), previewRect.y(), previewRect.width(), previewRect.height(), leftMargin, rightMargin, scrollbarWidth);
+			check(nativeBar && scrollbarWidth > 0 && matchesDeliveredCanvas && browserRect.contains(previewRect) &&
+				      std::abs(leftMargin - outerMargin) <= 1 &&
+				      std::abs(rightMargin - scrollbarWidth - outerMargin) <= 1 &&
+				      std::abs(leftMargin - (rightMargin - scrollbarWidth)) <= 1 &&
 				      previewRect.width() > browserRect.width() * 0.95,
-			      "Resized preview fills its intended width with symmetric margins");
+			      "Resized native canvas matches delivered HTML bounds and symmetric outer margins including the right scrollbar");
 			check(obs_sceneitem_get_rot(fixture->itemA) == 0.0f && obs_sceneitem_get_rot(fixture->itemB) == 90.0f,
 			      "No old rotate remains queued after scene changes");
 			class DeclineClose final : public QObject {
@@ -199,8 +242,11 @@ void runIntegrationChecks()
 				auto *mixerDock = main->findChild<QDockWidget *>(QStringLiteral("mixerDock"));
 				RunAudioMixerVisualChecks(static_cast<OBSBasic *>(main), webDockViews.value(mixerDock), [this] { publishState(true); }, check, [this, fixture, check] {
 				runWorkspaceChecks(check, [this, fixture, check] {
+				runPreviewParityChecks(check, [this, fixture, check] {
 				RunDialogWorkflowChecks(static_cast<OBSBasic *>(main), check, [this, fixture, check] {
 				RunOutputWorkflowChecks(static_cast<OBSBasic *>(main), check, [this, fixture, check] {
+				auto *controlsDock = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
+				RunReplayOutputWorkflowChecks(static_cast<OBSBasic *>(main), webDockViews.value(controlsDock), [this] { publishState(true); }, check, [this, fixture, check] {
 				obs_sceneitem_set_visible(fixture->itemA, false);
 				obs_sceneitem_set_locked(fixture->itemA, true);
 				savePersistenceFixture(check);
@@ -214,7 +260,10 @@ void runIntegrationChecks()
 				});
 				});
 				});
+				});
+				});
 			});
 		});
 	});
+	readinessTimer->start();
 }

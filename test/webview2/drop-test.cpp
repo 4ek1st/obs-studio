@@ -4,6 +4,7 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <QJsonArray>
 #include <QWidget>
 #include <iostream>
@@ -23,10 +24,17 @@ int main(int argc, char **argv)
 	int checks = 0, failed = 0;
 	auto check = [&](bool ok, const char *what) { ++checks; if (!ok) { ++failed; std::cerr << "FAIL: " << what << '\n'; } };
 	check(OBSWeb::IsExternalDropOrigin("https://obs-ui.example/index.html"), "workspace is trusted");
+	check(OBSWeb::IsExternalDropOrigin("https://obs-ui.example/dialog.html", "dialog.html"), "dialog host explicitly authorizes its own document");
+	check(!OBSWeb::IsExternalDropOrigin("https://obs-ui.example/index.html", "dialog.html") &&
+	      !OBSWeb::IsExternalDropOrigin("https://obs-ui.example/dialog.html?x=1", "dialog.html") &&
+	      !OBSWeb::IsExternalDropOrigin("https://obs-ui.example/custom.html", "custom.html"), "dialog drop authorization cannot cross document boundaries");
 	for (const auto *origin : {"https://example.com/index.html", "https://obs-ui.example/dialog.html", "file:///index.html", "https://obs-ui.example:444/index.html", "https://obs-ui.local/index.html"})
 		check(!OBSWeb::IsExternalDropOrigin(origin), "other origins/documents cannot import drops");
 	QString error;
 	QTemporaryFile file; if (!file.open()) return 2;
+	QTemporaryDir directory; if (!directory.isValid()) return 2;
+	const auto folder = OBSWeb::ParseExternalDrop({{"kind", "files"}, {"count", 1}}, {directory.path()}, error);
+	check(folder && folder->urls == QList<QUrl>{QUrl::fromLocalFile(directory.path())}, "trusted native directory remains available to Remux and Importer enumeration");
 	auto parsed = OBSWeb::ParseExternalDrop({{"kind", "files"}, {"count", 1}}, {file.fileName()}, error);
 	check(parsed && parsed->urls == QList<QUrl>{QUrl::fromLocalFile(file.fileName())}, "native file becomes local MIME URL");
 	check(!OBSWeb::ParseExternalDrop({{"kind", "files"}, {"count", 1}, {"path", file.fileName()}}, {}, error), "JSON cannot authorize a local file");

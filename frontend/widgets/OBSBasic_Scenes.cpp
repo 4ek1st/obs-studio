@@ -19,6 +19,9 @@
 
 #include "OBSBasic.hpp"
 #include "OBSProjector.hpp"
+#ifdef WEBVIEW2_AVAILABLE
+#include <webview2/OBSWebView2.hpp>
+#endif
 
 #include <dialogs/NameDialog.hpp>
 
@@ -536,6 +539,9 @@ void OBSBasic::on_scenes_currentItemChanged(QListWidgetItem *current, QListWidge
 
 void OBSBasic::EditSceneName()
 {
+#ifdef WEBVIEW2_AVAILABLE
+	if (BeginWebView2Rename(this, false)) return;
+#endif
 	ui->scenesDock->removeAction(renameScene);
 	QListWidgetItem *item = ui->scenes->currentItem();
 	Qt::ItemFlags flags = item->flags();
@@ -762,6 +768,9 @@ void OBSBasic::MoveSceneToBottom()
 
 void OBSBasic::EditSceneItemName()
 {
+#ifdef WEBVIEW2_AVAILABLE
+	if (BeginWebView2Rename(this, true)) return;
+#endif
 	int idx = GetTopSelectedSourceItem();
 	ui->sources->Edit(idx);
 }

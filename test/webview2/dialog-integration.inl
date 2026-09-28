@@ -13,6 +13,9 @@
 #include <QImageReader>
 #include <QLabel>
 #include <QListWidget>
+#include <QLineEdit>
+#include <QKeyEvent>
+#include <QSpinBox>
 #include <QMenu>
 #include <QPointer>
 #include <QPushButton>
@@ -204,9 +207,25 @@ class DialogWorkflowChecks : public QObject {
 		OBSWeb::QtDialogBridge bridge(dialog);
 		const auto state = bridge.snapshot();
 		const auto width = findNode(state, "type", "number");
-		if (width.isEmpty()) { fail("color source dynamic properties contain editable numeric fields"); return; }
-		command(bridge, "dialog.input", {{"id", width.value("id")}, {"value", 854}}, "HTML number updates real dynamic color source properties");
-		command(bridge, "dialog.finish", {{"id", width.value("id")}}, "dynamic property edit emits its commit signal");
+		if (!width.isEmpty()) {
+			command(bridge, "dialog.input", {{"id", width.value("id")}, {"value", 854}}, "HTML number updates real dynamic color source properties");
+			command(bridge, "dialog.finish", {{"id", width.value("id")}}, "dynamic property edit emits its commit signal");
+		} else {
+			QSpinBox *spin = nullptr;
+			for (auto *candidate : dialog->findChildren<QSpinBox *>())
+				if (candidate->isVisible() && candidate->isEnabled() && !candidate->isReadOnly()) { spin = candidate; break; }
+			if (!spin) { fail("color source dynamic properties contain an editable native spinbox"); return; }
+			const auto oldName = spin->objectName(); spin->setObjectName("dialogWorkflowWidth");
+			const auto native = findNode(bridge.snapshot(), "name", "dialogWorkflowWidth"); spin->setObjectName(oldName);
+			auto *surface = dialog->findChild<WebView2Widget *>("obsWebView2DialogSurface", Qt::FindDirectChildrenOnly);
+			check(native.value("type") == "native" && surface && !surface->mask().contains(spin->mapTo(dialog, spin->rect().center())),
+				"custom OBS width editor is a reachable native island in the WebView dialog");
+			auto *editor = spin->findChild<QLineEdit *>();
+			if (!editor) { fail("native width spinbox exposes its original text editor"); return; }
+			editor->selectAll(); editor->insert("854");
+			QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier); QApplication::sendEvent(spin, &enter);
+			check(spin->value() == 854 && dialog->isVisible(), "original OBS spinbox commits width without accepting its properties dialog");
+		}
 		button(dialog, bridge, QDialogButtonBox::Ok);
 		QTimer::singleShot(150, this, [this] {
 			OBSSourceAutoRelease current = obs_get_source_by_uuid(sourceUuid.toUtf8().constData());
@@ -260,8 +279,12 @@ class DialogWorkflowChecks : public QObject {
 			OBSWeb::QtDialogBridge bridge(filters);
 			const auto state = bridge.snapshot();
 			bool dynamicProperties = false;
-			for (const auto entry : state.value("nodes").toArray()) if (entry.toObject().value("type") == "number") dynamicProperties = true;
-			check(dynamicProperties, "added filter's dynamic numeric properties are rendered by the HTML bridge");
+			for (const auto entry : state.value("nodes").toArray()) {
+				const auto control = entry.toObject();
+				if (control.value("type") == "number" || (control.value("type") == "native" &&
+					(control.value("class") == "OBS::SpinBox" || control.value("class") == "OBS::DoubleSpinBox"))) dynamicProperties = true;
+			}
+			check(dynamicProperties, "added filter's dynamic numeric properties retain HTML or original native editors");
 			button(filters, bridge, QDialogButtonBox::Close);
 		}
 		originalWarning = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStartingStream");
