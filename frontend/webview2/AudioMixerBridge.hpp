@@ -32,6 +32,7 @@ public:
 	LevelMeter &operator=(const LevelMeter &) = delete;
 
 	QJsonArray peaks() const;
+	int channelCount() const;
 	void setTruePeak(bool enabled);
 
 private:

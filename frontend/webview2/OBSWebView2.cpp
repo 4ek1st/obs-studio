@@ -15,6 +15,7 @@
 #include <components/VolumeControl.hpp>
 #include <components/SourceTree.hpp>
 #include <QFile>
+#include <QFontInfo>
 #include <QBuffer>
 #include <memory>
 #include <utility/platform.hpp>
@@ -39,6 +40,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPointer>
+#include <QRegion>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QToolBar>
@@ -146,6 +148,8 @@ class OBSWebView2 final : public QWidget {
 	bool ownsApplicationSession = QCoreApplication::arguments().contains(QStringLiteral("--webview2"));
 	QByteArray lastState;
 	bool failedFrontend = false;
+	QRegion htmlOverlays;
+	bool htmlModalOpen = false;
 #ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
 	QJsonObject lastTestReply;
 #endif
@@ -277,7 +281,7 @@ class OBSWebView2 final : public QWidget {
 		const auto serialized = QJsonDocument(state).toJson(QJsonDocument::Compact);
 		if (force || serialized != lastState) {
 			lastState = serialized;
-			browser->postMessage(QJsonObject{{"version", 1}, {"event", "state.changed"}, {"data", state}});
+			postWorkspaceMessage(QJsonObject{{"version", 1}, {"event", "state.changed"}, {"data", state}});
 		}
 	}
 
@@ -286,7 +290,7 @@ class OBSWebView2 final : public QWidget {
 		#ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
 		lastTestReply = QJsonObject{{"ok", true}, {"result", result}};
 #endif
-		browser->postMessage(QJsonObject{{"version", 1}, {"id", id}, {"ok", true}, {"result", result}});
+		postWorkspaceMessage(QJsonObject{{"version", 1}, {"id", id}, {"ok", true}, {"result", result}});
 	}
 
 	void reject(const QString &id, const QString &code, const QString &message)
@@ -294,7 +298,7 @@ class OBSWebView2 final : public QWidget {
 		#ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
 		lastTestReply = QJsonObject{{"ok", false}, {"error", QJsonObject{{"code", code}, {"message", message}}}};
 #endif
-		browser->postMessage(QJsonObject{{"version", 1}, {"id", id}, {"ok", false},
+		postWorkspaceMessage(QJsonObject{{"version", 1}, {"id", id}, {"ok", false},
 						{"error", QJsonObject{{"code", code}, {"message", message}}}});
 	}
 
@@ -434,13 +438,32 @@ class OBSWebView2 final : public QWidget {
                 reject(id, QStringLiteral("InvalidArgs"), QStringLiteral("Invalid preview bounds or viewport."));
                 return;
             }
+            QRegion overlays;
+            if (args.contains("overlays")) {
+                const auto value = args.value("overlays");
+                if (!value.isArray() || value.toArray().size() > 32) {
+                    reject(id, "InvalidArgs", "Invalid overlay rectangles."); return;
+                }
+                for (const auto entry : value.toArray()) {
+                    if (!entry.isObject()) { reject(id, "InvalidArgs", "Invalid overlay rectangle."); return; }
+                    auto overlay = entry.toObject();
+                    overlay.insert("viewportWidth", args.value("viewportWidth"));
+                    overlay.insert("viewportHeight", args.value("viewportHeight"));
+                    const auto rect = OBSWeb::PreviewRect(overlay, browser->geometry());
+                    if (!rect) { reject(id, "InvalidArgs", "Overlay is outside the viewport."); return; }
+                    overlays |= rect->translated(-browser->pos());
+                }
+            }
+            htmlOverlays = overlays;
+            htmlModalOpen = args.value("modal").toBool();
             syncProgramSurface();
             OBSQTDisplay *surface = target == "program" ? programPreview.data() : preview;
             if (surface) {
                 surface->setGeometry(*bounds);
                 surface->setVisible(args.value("visible").toBool(true) && !bounds->isEmpty());
-                surface->raise();
+                surface->installEventFilter(this);
             }
+            updatePreviewMask();
             if (target == "preview" && !reportedPreviewGeometry) {
                 reportedPreviewGeometry = true;
                 blog(LOG_INFO, "[WebView2] Native editor viewport %.1fx%.1f CSS, host %dx%d Qt, rect %d,%d %dx%d",
@@ -496,6 +519,21 @@ class OBSWebView2 final : public QWidget {
 #endif
 
 protected:
+	bool eventFilter(QObject *watched, QEvent *event) override
+	{
+		if (surfacesBorrowed && (watched == preview || watched == programPreview.data())) {
+			if (htmlModalOpen && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::Wheel ||
+					      event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease)) {
+				browser->setFocus(Qt::OtherFocusReason);
+				return true;
+			}
+			if (!htmlOverlays.isEmpty() && event->type() == QEvent::MouseButtonPress) {
+				browser->postMessage({{"version", 1}, {"event", "overlays.dismiss"}, {"data", QJsonObject{}}});
+				return true;
+			}
+		}
+		return QWidget::eventFilter(watched, event);
+	}
 	void dragEnterEvent(QDragEnterEvent *event) override { QApplication::sendEvent(main, event); }
 	void dropEvent(QDropEvent *event) override { QApplication::sendEvent(main, event); }
 	void changeEvent(QEvent *event) override
@@ -525,10 +563,30 @@ protected:
 	}
 
 public:
+	void updatePreviewMask()
+	{
+		if (!surfacesBorrowed) { browser->clearMask(); return; }
+		QRegion region(browser->rect());
+		for (auto *surface : {preview, programPreview.data()}) {
+			if (!surface || surface->parentWidget() != this || surface->isHidden()) continue;
+			region -= surface->geometry().translated(-browser->pos());
+			surface->lower();
+		}
+		region |= htmlOverlays.intersected(QRegion(browser->rect()));
+		// The browser remains above native GPU displays. Only its video slots are
+		// punched out; HTML menus cover their own overlap without hiding the video.
+		if (region == QRegion(browser->rect())) browser->clearMask();
+		else browser->setMask(region);
+		browser->raise();
+	}
 	bool hasFailed() const { return failedFrontend; }
 	void restoreSurfaces()
 	{
+		restoreWebDocks();
 		if (!surfacesBorrowed) return;
+		browser->clearMask();
+		htmlOverlays = {};
+		htmlModalOpen = false;
 		programPlacement.restore(programPreview);
 		if (nativeEditor) previewPlacement.restore(preview);
 		surfacesBorrowed = false;
@@ -571,6 +629,7 @@ public:
 		errorLabel->hide();
 		layout->addWidget(errorLabel);
 		browser = new WebView2Widget(this, assets, profile);
+		initializeWebDocks(assets, profile);
 		layout->addWidget(browser);
         preview = main->findChild<OBSBasicPreview *>(QStringLiteral("preview"));
         nativeEditor = preview != nullptr;
@@ -589,7 +648,7 @@ public:
         meterTimer = new QTimer(this);
         meterTimer->setInterval(50);
         connect(meterTimer, &QTimer::timeout, this, [this] {
-            browser->postMessage(QJsonObject{{"version", 1}, {"event", "audio.levels"}, {"data", audio->levels()}});
+            postWorkspaceMessage(QJsonObject{{"version", 1}, {"event", "audio.levels"}, {"data", audio->levels()}});
         });
         InstallWebView2Dialogs(main, assets, profile);
 		timer = new QTimer(this);
@@ -647,6 +706,7 @@ public:
         meterTimer->stop();
         audio.reset();
         restoreSurfaces();
+        destroyWebDocks();
         if (!nativeEditor) {
             if (preview->GetDisplay())
                 obs_display_remove_draw_callback(preview->GetDisplay(), drawPreview, this);

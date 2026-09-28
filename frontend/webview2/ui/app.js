@@ -9,7 +9,7 @@ let menuSignature = "", boundsFrame = 0, connected = false;
 const boundsSignatures = new Map(), audioElements = new Map(), actionsByName = new Map();
 const defaultPanelOrder = ["scenesDock","sourcesDock","mixerDock","transitionsDock","controlsDock"];
 const defaultPanelWeights = {scenesDock:1,sourcesDock:1.13,mixerDock:1.65,transitionsDock:1.05,controlsDock:1.18};
-let panelWeights = {...defaultPanelWeights}, movingPanel;
+let panelWeights = {...defaultPanelWeights}, movingPanel, panelMode = "";
 const nativeCommands = new Set(["action.invoke", "control.click", "native.command", "source.visibility", "source.lock", "source.expand", "source.rename", "source.move", "scene.rename", "scene.move"]);
 const iconPaths = {
   plus:"M8 2v12M2 8h12", trash:"M3 4h10M6 2h4M4 4l1 10h6l1-10M7 6v6M9 6v6",
@@ -18,7 +18,8 @@ const iconPaths = {
   lock:"M4 7h8v7H4zM5 7V5a3 3 0 0 1 6 0v2", volume:"M2 6h3l4-3v10l-4-3H2zM11 5c3 1 3 5 0 6",
   muted:"M2 6h3l4-3v10l-4-3H2zM11 6l4 4M15 6l-4 4", filter:"M2 3h12L9 8v5l-2 1V8z",
   folder:"M1 4h5l2 2h7v7H1zM1 4V2h5l2 2h6v2", image:"M2 2h12v12H2zM3 11l3-4 3 3 2-2 3 4M11 5h.1",
-  copy:"M6 5h8v9H6zM2 11V2h8", dots:"M8 3h.1M8 8h.1M8 13h.1", monitor:"M2 2h12v9H2zM5 14h6M8 11v3"
+  copy:"M6 5h8v9H6zM2 11V2h8", dots:"M8 3h.1M8 8h.1M8 13h.1", monitor:"M2 2h12v9H2zM5 14h6M8 11v3",
+  headphones:"M2 9V7a6 6 0 0 1 12 0v2M2 8h3v6H2zM11 8h3v6h-3z", layoutVertical:"M2 2h4v12H2zM10 2h4v12h-4z", layoutHorizontal:"M2 2h12v4H2zM2 10h12v4H2z"
 };
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -201,44 +202,90 @@ function renderRows(element,rows,sources=false) {
   if(focused)Array.from(element.children).find(x=>x.dataset.id===focused)?.focus({preventScroll:true});
 }
 function renderMixer(channels) {
-  const present=new Set();
+  const present=new Set(), vertical=!!state.workspace?.verticalMixer;
+  let cursor=$("mixer").firstElementChild;
   for(const channel of (channels||[]).filter(c=>c.visible!==false)) {
     present.add(channel.uuid);let entry=audioElements.get(channel.uuid);
     if(!entry) {
       const container=document.createElement("section");container.className="audio-channel";container.dataset.uuid=channel.uuid;
-      const title=document.createElement("div");title.className="audio-title";const name=document.createElement("span"),db=document.createElement("span");db.className="audio-db";title.append(name,db);
+      const context=()=>request("native.command",{id:"audio.context",uuid:channel.uuid});
+      const title=document.createElement("div");title.className="audio-title";
+      const name=button("",context);name.className="audio-name";
+      const nameText=document.createElement("span"),chevron=document.createElement("span");chevron.className="audio-chevron";chevron.textContent="▾";name.append(nameText,chevron);
+      const category=document.createElement("span");category.className="audio-category";
+      const db=document.createElement("span");db.className="audio-db";title.append(category,name,db);
+      const controls=document.createElement("div");controls.className="audio-controls";
+      const body=document.createElement("div");body.className="audio-body";
+      const fader=document.createElement("div");fader.className="audio-fader";
+      const ticks=document.createElement("div");ticks.className="fader-ticks";ticks.setAttribute("aria-hidden","true");
+      const volume=document.createElement("input");volume.type="range";volume.min="0";volume.max="1";volume.step=String(1/4096);fader.append(ticks,volume);
+      const meterFrame=document.createElement("div");meterFrame.className="meter-frame";meterFrame.setAttribute("aria-hidden","true");
       const meters=document.createElement("div");meters.className="meters";
-      for(let n=0;n<2;n++){const bar=document.createElement("div");bar.className="meter";const mask=document.createElement("span");mask.className="mask";bar.append(mask);meters.append(bar);}
-      const scale=document.createElement("div");scale.className="meter-scale";for(const value of ["−60","−50","−40","−30","−20","−10","0"]){const label=document.createElement("span");label.textContent=value;scale.append(label);}
-      const controls=document.createElement("div");controls.className="audio-controls";const volume=document.createElement("input");volume.type="range";volume.min="0";volume.max="1";volume.step="0.001";
-      let pending,flight=false;
+      const scale=document.createElement("div");scale.className="meter-scale";
+      for(let value=0;value>=-60;value-=6){const label=document.createElement("span");label.textContent=value;label.style.setProperty("--tick",String(-value/60));scale.append(label);}
+      meterFrame.append(meters,scale);body.append(fader,meterFrame);
+      const buttons=document.createElement("div");buttons.className="audio-buttons";
+      let pending,flight=false,pointerEditing=false;
+      const volumeBusy=()=>pointerEditing||flight||pending!==undefined;
+      const endVolumeEdit=()=>{
+        pointerEditing=false;
+        const current=state?.audio.find(item=>item.uuid===channel.uuid);
+        if(current&&!volumeBusy()){volume.value=current.volume;fader.style.setProperty("--volume",Number(volume.value)*100+"%");}
+      };
+      volume.addEventListener("pointerdown",event=>{if(event.button===0){pointerEditing=true;volume.setPointerCapture(event.pointerId);}});
+      for(const event of ["pointerup","pointercancel","lostpointercapture"])volume.addEventListener(event,endVolumeEdit);
       const sendVolume=async()=>{if(flight)return;flight=true;while(pending!==undefined){const value=pending;pending=undefined;await request("audio.volume",{uuid:channel.uuid,value});}flight=false;};
-      volume.addEventListener("input",()=>{pending=Number(volume.value);sendVolume();});
-      const mute=iconButton("volume","Заглушить",()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.mute",{uuid:channel.uuid,value:!current.muted});});
-      const more=iconButton("dots","Свойства аудио",event=>{
-        const current=state.audio.find(c=>c.uuid===channel.uuid);if(!current)return;
-        showContext(event,[{text:"Мониторинг",checked:current.monitoring!==0,callback:()=>request("audio.monitor",{uuid:channel.uuid,value:current.monitoring?0:2})},
-          {text:"Фильтры",callback:()=>request("source.filters",{uuid:channel.uuid})},{text:"Свойства",callback:()=>request("source.properties",{uuid:channel.uuid})},
-          {text:"Расширенные свойства аудио",callback:()=>invokeName("actionAdvAudioProperties")},
-          {text:"Все действия канала…",callback:()=>request("native.command",{id:"audio.context",uuid:channel.uuid})}]);
-      });
-      controls.append(volume,mute,more);container.append(title,meters,scale,controls);entry={container,name,db,volume,mute,meters};audioElements.set(channel.uuid,entry);$("mixer").append(container);
+      volume.addEventListener("input",()=>{fader.style.setProperty("--volume",Number(volume.value)*100+"%");pending=Number(volume.value);sendVolume();});
+      const mute=iconButton("volume","Заглушить",()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.mute",{uuid:channel.uuid,value:!current.muted});});mute.className="audio-mute";
+      const monitor=iconButton("headphones","Включить мониторинг",()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.monitor",{uuid:channel.uuid,value:current.monitoring?0:2});});monitor.className="audio-monitor";
+      buttons.append(mute,monitor);controls.append(body,buttons);container.append(title,controls);
+      container.addEventListener("contextmenu",event=>{event.preventDefault();context();});
+      entry={container,name,nameText,category,db,volume,volumeBusy,mute,monitor,meters,fader,ticks};audioElements.set(channel.uuid,entry);
     }
-    entry.name.textContent=channel.name;entry.db.textContent=Number.isFinite(channel.db)?channel.db.toFixed(1)+" dB":"−∞ dB";entry.volume.setAttribute("aria-label",channel.name+" — громкость");
-    if(document.activeElement!==entry.volume)entry.volume.value=channel.volume;
-    entry.volume.disabled=!channel.enabled||channel.volumeEnabled===false;entry.mute.disabled=!channel.enabled;entry.mute.classList.toggle("muted",channel.muted);
-    entry.mute.setAttribute("aria-label",channel.muted?"Включить звук "+channel.name:"Заглушить "+channel.name);entry.mute.setAttribute("aria-pressed",String(channel.muted));
-    entry.mute.replaceChildren(icon(channel.muted?"muted":"volume"));
+    entry.nameText.textContent=channel.name;entry.name.title=channel.name;entry.name.setAttribute("aria-label","Действия канала: "+channel.name);
+    entry.category.textContent=channel.category|| (channel.global?"Глобальный":channel.pinned?"Закреплён":channel.active===false?"Неактивен":"Активен");
+    entry.db.textContent=channel.dbText|| (Number.isFinite(channel.db)&&channel.db>-96?channel.db.toFixed(1)+" dB":"-inf dB");entry.volume.setAttribute("aria-label",channel.name+" — громкость");
+    entry.volume.setAttribute("aria-orientation",vertical?"vertical":"horizontal");entry.volume.setAttribute("aria-valuetext",entry.db.textContent);
+    if(!entry.volumeBusy())entry.volume.value=channel.volume;
+    entry.fader.style.setProperty("--volume",Number(entry.volume.value)*100+"%");
+    entry.volume.disabled=!channel.enabled||channel.volumeEnabled===false;
+    entry.mute.disabled=!channel.enabled||channel.muteEnabled===false;entry.monitor.disabled=!channel.enabled||channel.monitorEnabled===false||channel.monitoringAvailable===false;
+    entry.mute.classList.toggle("muted",channel.muted);entry.monitor.classList.toggle("monitored",!!channel.monitoring);
+    for(const [control,prefix,fallback,pressed] of [[entry.mute,"mute",channel.muted?"muted":"volume",channel.muted],[entry.monitor,"monitor","headphones",!!channel.monitoring]]){
+      control.title=channel[prefix+"Tooltip"]||(prefix==="mute"?(pressed?"Включить звук":"Заглушить"):(pressed?"Отключить мониторинг":"Включить мониторинг"));
+      control.setAttribute("aria-label",control.title+": "+channel.name);control.setAttribute("aria-pressed",String(pressed));
+      const image=channel[prefix+"Icon"],signature=image||fallback;
+      if(control.dataset.icon!==signature){control.dataset.icon=signature;if(image?.startsWith("data:image/png;base64,")){const img=document.createElement("img");img.src=image;img.alt="";control.replaceChildren(img);}else control.replaceChildren(icon(fallback));}
+    }
+    const count=Math.max(1,Math.min(8,channel.channels||2));
+    if(entry.meters.childElementCount!==count){entry.meters.replaceChildren();for(let n=0;n<count;n++){const bar=document.createElement("div");bar.className="meter";const peak=document.createElement("span");peak.className="meter-peak";bar.append(peak);entry.meters.append(bar);}}
+    entry.meters.style.setProperty("--channels",String(count));
+    entry.container.style.setProperty("--channel-width",Math.max(70,Math.min(110,channel.preferredWidth||88))+"px");
+    for(const [key,variable] of [["categoryColor","category-text"],["categoryBackground","category-bg"]])if(/^#[0-9a-f]{6}$/i.test(channel[key]||""))entry.container.style.setProperty("--"+variable,channel[key]);
+    const disabledColors=channel.muted||channel.active===false||(channel.unassigned&&!channel.monitoring);
+    for(const [variable,key]of [["meter-bg-green","backgroundNominalColor"],["meter-bg-yellow","backgroundWarningColor"],["meter-bg-red","backgroundErrorColor"],["meter-green","foregroundNominalColor"],["meter-yellow","foregroundWarningColor"],["meter-red","foregroundErrorColor"]]){
+      const color=channel.meterColors?.[key+(disabledColors?"Disabled":"")];if(/^#[0-9a-f]{6}$/i.test(color||""))entry.container.style.setProperty("--"+variable,color);
+    }
+    entry.container.classList.toggle("audio-inactive",channel.active===false);
+    const ticks=channel.faderTicks||[],signature=JSON.stringify(ticks);
+    if(entry.ticks.dataset.signature!==signature){entry.ticks.dataset.signature=signature;entry.ticks.replaceChildren(...ticks.map(value=>{const tick=document.createElement("span");tick.style.setProperty("--fader-tick",String(value));return tick;}));}
+    // Keep pointer capture/focus during volume changes. Move only when native
+    // group/order actually changed; an append on every snapshot ends a drag.
+    if(entry.container===cursor)cursor=cursor.nextElementSibling;
+    else $("mixer").insertBefore(entry.container,cursor);
   }
   for(const [uuid,entry]of audioElements)if(!present.has(uuid)){entry.container.remove();audioElements.delete(uuid);}
   $("mixer").querySelector(".empty")?.remove();
   if(!present.size){const empty=document.createElement("div");empty.className="empty";empty.textContent="Аудиоисточники появятся здесь после добавления."; $("mixer").append(empty);}
+  const footer=state.mixerToolbar||{},hidden=footer.hidden;
+  mixerHidden.textContent=hidden?.text||"Скрыто: "+(channels||[]).filter(channel=>channel.hidden).length;mixerHidden.disabled=hidden?.enabled!==true;mixerHidden.title=hidden?.tooltip||"Показать скрытые каналы";mixerHidden.setAttribute("aria-pressed",String(!!hidden?.checked));
+  mixerLayout.title=vertical?"Горизонтальная компоновка":"Вертикальная компоновка";mixerLayout.setAttribute("aria-label",mixerLayout.title);mixerLayout.replaceChildren(icon(vertical?"layoutHorizontal":"layoutVertical"));
+  $("mixer-menu").textContent=(footer.optionsText||"Параметры")+" ▾";
 }
 function updateLevels(levels) {
   for(const [uuid,values]of Object.entries(levels||{})){
     const entry=audioElements.get(uuid);if(!entry)continue;
-    const masks=entry.meters.querySelectorAll(".mask");
-    masks.forEach((mask,index)=>{const db=values[index]??values[0]??-60;const value=Math.max(0,Math.min(1,(db+60)/60));mask.style.width=(100-value*100)+"%";});
+    entry.meters.querySelectorAll(".meter-peak").forEach((peak,index)=>{const db=values[index]??-100;const value=Math.max(0,Math.min(1,(db+60)/60));peak.style.setProperty("--peak-empty",(100-value*100)+"%");});
   }
 }
 function renderTransitions(next) {
@@ -278,6 +325,8 @@ function render(next) {
   for(const [id,label]of [["scenes-title","Basic.Main.Scenes"],["sources-title","Basic.Main.Sources"],["mixer-title","Mixer"],["controls-title","Basic.Main.Controls"],["transitions-title","Basic.SceneTransitions"]])if(next.labels?.[label])$(id).textContent=next.labels[label];
   if(next.appearance){const a=next.appearance;for(const [variable,key]of [["bg","background"],["panel","panel"],["raised","raised"],["text","text"],["muted","muted"],["selected","selected"],["selection-text","selectedText"]])if(/^#[0-9a-f]{6}$/i.test(a[key]||""))document.documentElement.style.setProperty("--"+variable,a[key]);document.documentElement.style.colorScheme=a.light?"light":"dark";document.body.classList.toggle("light-theme",!!a.light);if(a.raised===a.background)document.documentElement.style.setProperty("--raised","color-mix(in srgb,var(--bg) 86%,var(--text) 14%)");}
   $("status").textContent=[Number.isFinite(next.cpu)?next.cpu.toFixed(1)+"% CPU":"",Number(next.fps||0).toFixed(2)+" FPS"].filter(Boolean).join("  ·  ");
+  if(next.appearance?.fontFamily)document.documentElement.style.fontFamily=JSON.stringify(next.appearance.fontFamily)+', "Open Sans", sans-serif';
+  if(next.appearance?.fontSize>0)document.documentElement.style.setProperty("--ui-font-size",next.appearance.fontSize+"px");
   $("output-status").textContent=(next.statusText||[]).filter(Boolean).join("    ")||[next.streaming?"● LIVE":"○ LIVE 00:00:00",next.recording?(next.paused?"Ⅱ REC":"● REC"):"○ REC 00:00:00"].join("    ");
   $("output-status").classList.toggle("live",next.recording||next.streaming);
   renderMenus(next.menus);indexActions(next.actions);
@@ -292,7 +341,10 @@ function render(next) {
   scheduleBounds();
 }
 function renderWorkspace(next) {
-  for(const dock of next.docks||[]){const panel=document.querySelector('[data-panel="'+CSS.escape(dock.name)+'"]');if(panel)panel.hidden=!dock.visible;}
+  for(const panel of $("panels").children){
+    const dock=(next.docks||[]).find(item=>item.name===panel.dataset.panel);
+    panel.hidden=panelMode?panel.dataset.panel!==panelMode:!!dock&&(!dock.visible||dock.floating);
+  }
   const preferences=next.workspace||{};
   $("scene-toolbar").hidden=$("source-toolbar").hidden=preferences.toggleListboxToolbars===false;
   $("context-bar").hidden=preferences.toggleContextBar===false;
@@ -303,16 +355,31 @@ function renderWorkspace(next) {
   const panels=Array.from($("panels").children).filter(panel=>!panel.hidden);
   $("panels").style.gridTemplateColumns=panels.map(panel=>"minmax(0,"+panelWeights[panel.dataset.panel]+"fr)").join(" ");
   $("panels").hidden=$("panel-resizer").hidden=!panels.length;
-  for(const panel of $("panels").children){panel.querySelector("h2").draggable=!preferences.lockDocks;panel.querySelector(".panel-width-handle").hidden=!!preferences.lockDocks||panel===panels.at(-1);}
+  for(const panel of $("panels").children){
+    const dock=(next.docks||[]).find(item=>item.name===panel.dataset.panel);
+    panel.querySelector("h2").draggable=false;
+    panel.querySelector("h2").classList.toggle("movable",!preferences.lockDocks&&!panelMode);
+    panel.querySelector(".panel-width-handle").hidden=!!panelMode||!!preferences.lockDocks||panel===panels.at(-1);
+    const toggle=panel.querySelector(".panel-float");
+    toggle.disabled=!!preferences.lockDocks||dock?.floatable===false;
+    const label=panelMode?"Вернуть панель в основное окно":"Отделить панель";
+    toggle.setAttribute("aria-label",label+": "+panel.querySelector("h2").textContent);
+    toggle.title=label;toggle.textContent=panelMode?"↙":"↗";
+  }
 }
 function scheduleBounds() {
+  if(panelMode)return;
   if(boundsFrame)return;
   boundsFrame=requestAnimationFrame(async()=>{
     boundsFrame=0;if(!connected)return;
-    const unobstructed=!document.querySelector(".menu[open]")&&$("context-menu").hidden&&!$("rename-dialog").open;
+    const overlayElements=[...document.querySelectorAll(".menu[open] > .menu-popover, .panel-drag-ghost"),...(!$("context-menu").hidden?[$("context-menu")]:[]),...($("rename-dialog").open?[$("rename-dialog")]:[])];
+    const overlays=overlayElements.map(element=>{
+      const rect=element.getBoundingClientRect(),x=Math.max(0,rect.left),y=Math.max(0,rect.top);
+      return {x,y,width:Math.max(0,Math.min(innerWidth,rect.right)-x),height:Math.max(0,Math.min(innerHeight,rect.bottom)-y)};
+    }).filter(rect=>rect.width&&rect.height);
     for(const target of ["preview","program"]){
-      const area=$(target),bounds=area.getBoundingClientRect(),visible=unobstructed&&(target==="preview"||state.studioMode);
-      const args={target,x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,viewportWidth:innerWidth,viewportHeight:innerHeight,visible};
+      const area=$(target),bounds=area.getBoundingClientRect(),visible=target==="preview"||state.studioMode;
+      const args={target,x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,viewportWidth:innerWidth,viewportHeight:innerHeight,visible,overlays,modal:$("rename-dialog").open};
       if(!bounds.width||!bounds.height){args.x=args.y=args.width=args.height=0;}
       const signature=JSON.stringify(args);if(boundsSignatures.get(target)===signature)continue;
       const result=await request("preview.bounds",args);if(result!==undefined)boundsSignatures.set(target,signature);
@@ -325,6 +392,11 @@ for(const kind of ["properties","filters","interact"])$(kind).addEventListener("
   const selected=state?.sources.filter(s=>s.selected);if(selected?.length===1)request("source."+kind,{uuid:selected[0].uuid});
 });
 $("advanced-audio").addEventListener("click",()=>invokeName("actionAdvAudioProperties"));
+const mixerToolbar=$("advanced-audio").parentElement;
+mixerToolbar.classList.add("mixer-toolbar");mixerToolbar.querySelector(".toolbar-caption")?.remove();
+const mixerHidden=button("Скрыто: 0",()=>{const id=state?.mixerToolbar?.hidden?.id;if(id)request("control.click",{id});});mixerHidden.className="mixer-hidden";
+const mixerLayout=iconButton("layoutVertical","Вертикальная компоновка",()=>{const id=state?.mixerToolbar?.layoutAction;if(id)request("action.invoke",{id});else invokeName("actionMixerToolbarToggleLayout");});mixerLayout.className="mixer-layout";
+mixerToolbar.prepend(mixerHidden,mixerLayout);$("advanced-audio").replaceChildren(icon("gear"));
 $("source-tools").addEventListener("click",()=>request("native.command",{id:"source.tools"}));
 $("mixer-menu").addEventListener("click",()=>request("native.command",{id:"audio.options"}));
 $("transition-type").addEventListener("change",()=>request("transition.select",{uuid:$("transition-type").value}));
@@ -361,15 +433,70 @@ try{
 }catch{}
 for(const panel of $("panels").children){
   const heading=panel.querySelector("h2"),handle=document.createElement("div");handle.className="panel-width-handle";handle.tabIndex=0;handle.setAttribute("role","separator");handle.setAttribute("aria-label","Ширина панели "+heading.textContent);handle.setAttribute("aria-orientation","vertical");panel.append(handle);
-  heading.title="Перетащите для перемещения панели";
-  heading.addEventListener("dragstart",event=>{if(state?.workspace?.lockDocks){event.preventDefault();return;}movingPanel=panel;event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",panel.dataset.panel);});
-  heading.addEventListener("dragover",event=>{if(movingPanel&&movingPanel!==panel)event.preventDefault();});
-  heading.addEventListener("drop",event=>{if(!movingPanel||movingPanel===panel)return;event.preventDefault();const list=Array.from($("panels").children),after=list.indexOf(movingPanel)<list.indexOf(panel);panel[after?"after":"before"](movingPanel);movingPanel=null;savePanelLayout();renderWorkspace(state);scheduleBounds();});
-  heading.addEventListener("dragend",()=>{movingPanel=null;});
-  heading.addEventListener("contextmenu",event=>{const dock=state?.docks?.find(d=>d.name===panel.dataset.panel);showContext(event,[...(dock?[{text:"Скрыть панель",callback:()=>request("action.invoke",{id:dock.action})}]:[]),{text:"Сбросить расположение панелей",callback:resetPanelLayout}]);});
+  heading.title="Перетащите по панелям для перестановки, за их пределы — в отдельное окно";
+  heading.tabIndex=0;
+  const toggleDock=(placement={})=>{const rect=panel.getBoundingClientRect();return request(panelMode?"dock.attach":"dock.detach",{name:panel.dataset.panel,width:rect.width,height:rect.height,viewportWidth:innerWidth,offsetX:placement.offsetX??36,offsetY:placement.offsetY??16});};
+  const floatButton=button("↗",()=>toggleDock());floatButton.className="panel-float";floatButton.setAttribute("aria-label","Отделить панель: "+heading.textContent);panel.append(floatButton);
+  const clearMove=()=>{
+    if(movingPanel?.heading!==heading)return;
+    movingPanel.ghost?.remove();movingPanel=null;panel.classList.remove("panel-dragging");
+    document.querySelectorAll(".panel-drop-before,.panel-drop-after").forEach(item=>item.classList.remove("panel-drop-before","panel-drop-after"));
+    scheduleBounds();
+  };
+  heading.addEventListener("pointerdown",event=>{
+    if(event.button!==0||panelMode||state?.workspace?.lockDocks)return;
+    event.preventDefault();heading.focus({preventScroll:true});
+    const rect=panel.getBoundingClientRect();
+    movingPanel={panel,heading,x:event.clientX,y:event.clientY,offsetX:event.clientX-rect.left,offsetY:event.clientY-rect.top,pointer:event.pointerId,active:false,target:null};
+    heading.setPointerCapture(event.pointerId);
+  });
+  heading.addEventListener("pointermove",event=>{
+    const move=movingPanel;if(!move||move.heading!==heading)return;
+    if(state?.workspace?.lockDocks){clearMove();return;}
+    if(!move.active&&Math.hypot(event.clientX-move.x,event.clientY-move.y)<6)return;
+    if(!move.active){
+      move.active=true;const rect=panel.getBoundingClientRect();move.ghost=panel.cloneNode(true);move.ghost.classList.add("panel-drag-ghost");
+      move.ghost.removeAttribute("data-panel");move.ghost.inert=true;move.ghost.setAttribute("aria-hidden","true");
+      for(const item of move.ghost.querySelectorAll("[id]"))item.removeAttribute("id");
+      move.ghost.querySelector(".panel-width-handle")?.remove();move.ghost.style.width=rect.width+"px";move.ghost.style.height=rect.height+"px";
+      panel.classList.add("panel-dragging");document.body.append(move.ghost);
+    }
+    move.ghost.style.left=(event.clientX-move.offsetX)+"px";move.ghost.style.top=(event.clientY-move.offsetY)+"px";
+    document.querySelectorAll(".panel-drop-before,.panel-drop-after").forEach(item=>item.classList.remove("panel-drop-before","panel-drop-after"));
+    const area=$("panels").getBoundingClientRect();
+    move.inside=event.clientX>=area.left&&event.clientX<=area.right&&event.clientY>=area.top&&event.clientY<=area.bottom;
+    move.target=null;
+    if(move.inside){
+      const candidates=Array.from($("panels").children).filter(item=>!item.hidden&&item!==panel);
+      move.target=candidates.find(item=>event.clientX<item.getBoundingClientRect().right)||candidates.at(-1);
+      if(move.target){const target=move.target.getBoundingClientRect();move.after=event.clientX>=target.left+target.width/2;move.target.classList.add(move.after?"panel-drop-after":"panel-drop-before");}
+    }
+    move.ghost.classList.toggle("detaching",!move.inside);scheduleBounds();
+  });
+  heading.addEventListener("pointerup",event=>{
+    const move=movingPanel;if(!move||move.heading!==heading)return;
+    if(move.active&&!state?.workspace?.lockDocks){
+      if(move.inside&&move.target){move.target[move.after?"after":"before"](panel);savePanelLayout();renderWorkspace(state);scheduleBounds();}
+      else if(!move.inside)toggleDock(move);
+    }
+    clearMove();
+    if(heading.hasPointerCapture(event.pointerId))heading.releasePointerCapture(event.pointerId);
+  });
+  heading.addEventListener("pointercancel",clearMove);
+  heading.addEventListener("lostpointercapture",()=>{if(movingPanel?.heading===heading)clearMove();});
+  heading.addEventListener("dblclick",()=>{if(!state?.workspace?.lockDocks)toggleDock();});
+  heading.addEventListener("keydown",event=>{
+    if(state?.workspace?.lockDocks)return;
+    if(event.key==="Escape"){clearMove();return;}
+    if(event.key==="Enter"){event.preventDefault();toggleDock();return;}
+    if(panelMode||!["ArrowLeft","ArrowRight"].includes(event.key))return;
+    event.preventDefault();const list=Array.from($("panels").children).filter(item=>!item.hidden),index=list.indexOf(panel),target=list[index+(event.key==="ArrowLeft"?-1:1)];
+    if(target){target[event.key==="ArrowLeft"?"before":"after"](panel);savePanelLayout();renderWorkspace(state);scheduleBounds();}
+  });
+  heading.addEventListener("contextmenu",event=>{const dock=state?.docks?.find(d=>d.name===panel.dataset.panel);showContext(event,[{text:panelMode?"Вернуть панель в основное окно":"Отделить панель",enabled:!state?.workspace?.lockDocks,callback:toggleDock},...(dock?[{text:"Скрыть панель",callback:()=>request("action.invoke",{id:dock.action})}]:[]),{text:"Сбросить расположение панелей",enabled:!state?.workspace?.lockDocks,callback:resetPanelLayout}]);});
   let resizing;
   const resizeWidth=delta=>{if(!resizing)return;const {left,right,width,first,second}=resizing;const shift=delta/width*(first+second),a=Math.max(.15,Math.min(first+second-.15,first+shift));panelWeights[left]=a;panelWeights[right]=first+second-a;renderWorkspace(state);};
-  handle.addEventListener("pointerdown",event=>{const next=Array.from($("panels").children).slice(Array.from($("panels").children).indexOf(panel)+1).find(p=>!p.hidden);if(!next)return;resizing={left:panel.dataset.panel,right:next.dataset.panel,x:event.clientX,width:panel.offsetWidth+next.offsetWidth,first:panelWeights[panel.dataset.panel],second:panelWeights[next.dataset.panel]};handle.setPointerCapture(event.pointerId);});
+  handle.addEventListener("pointerdown",event=>{if(event.button!==0||panelMode||state?.workspace?.lockDocks)return;const next=Array.from($("panels").children).slice(Array.from($("panels").children).indexOf(panel)+1).find(p=>!p.hidden);if(!next)return;resizing={left:panel.dataset.panel,right:next.dataset.panel,x:event.clientX,width:panel.offsetWidth+next.offsetWidth,first:panelWeights[panel.dataset.panel],second:panelWeights[next.dataset.panel]};handle.setPointerCapture(event.pointerId);});
   handle.addEventListener("pointermove",event=>resizeWidth(event.clientX-(resizing?.x||event.clientX)));
   handle.addEventListener("pointerup",()=>{resizing=null;savePanelLayout();});
   handle.addEventListener("keydown",event=>{if(!["ArrowLeft","ArrowRight"].includes(event.key)||state?.workspace?.lockDocks)return;event.preventDefault();const list=Array.from($("panels").children).filter(p=>!p.hidden),next=list[list.indexOf(panel)+1];if(!next)return;resizing={left:panel.dataset.panel,right:next.dataset.panel,width:panel.offsetWidth+next.offsetWidth,first:panelWeights[panel.dataset.panel],second:panelWeights[next.dataset.panel]};resizeWidth(event.key==="ArrowLeft"?-15:15);resizing=null;savePanelLayout();});
@@ -379,8 +506,9 @@ resizer.addEventListener("pointerdown",event=>{sizing=true;resizer.setPointerCap
 resizer.addEventListener("pointermove",event=>{if(sizing){const height=Math.max(195,Math.min(innerHeight*.65,innerHeight-event.clientY-28));document.documentElement.style.setProperty("--panel-height",height+"px");scheduleBounds();}});
 resizer.addEventListener("pointerup",()=>{sizing=false;try{localStorage.setItem("obs.panels.height",String($("panels").offsetHeight));}catch{}});
 resizer.addEventListener("keydown",event=>{if(!["ArrowUp","ArrowDown"].includes(event.key))return;event.preventDefault();document.documentElement.style.setProperty("--panel-height",Math.max(195,$("panels").offsetHeight+(event.key==="ArrowUp"?10:-10))+"px");scheduleBounds();});
+document.addEventListener("toggle",scheduleBounds,true);
 new ResizeObserver(scheduleBounds).observe($("preview"));new ResizeObserver(scheduleBounds).observe($("program"));
 window.addEventListener("resize",scheduleBounds);window.addEventListener("pagehide",()=>bridge?.dispose());
-try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",updateLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignatures.clear();scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);}
+try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",updateLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignatures.clear();scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel");if(state)renderWorkspace(state);});}
 catch(error){showError(error);$("connection").textContent="Нет соединения с OBS";}
 if(bridge)installExternalDrop(document,{onError:showError});

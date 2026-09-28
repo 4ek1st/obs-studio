@@ -1,5 +1,6 @@
 (() => {
   const events = new Set();
+  let undoAudio;
   const state = {
     title: "OBS — browser fixture", context: "fixture-context",
     scenes: [{ uuid: "scene-1", name: "Основная сцена" }, { uuid: "scene-2", name: "Пауза" }, { uuid: "scene-3", name: "Камера" }],
@@ -13,9 +14,12 @@
   const action = (name, text, enabled=true) => ({id:name,name,text,enabled});
   state.sceneToolbar=[action("actionAddScene","Добавить сцену"),action("actionRemoveScene","Удалить сцену"),{separator:true},action("actionSceneFilters","Фильтры сцены"),action("actionSceneUp","Переместить вверх"),action("actionSceneDown","Переместить вниз")];
   state.sourceToolbar=[action("actionAddSource","Добавить источник"),action("actionRemoveSource","Удалить источник"),{separator:true},action("actionSourceProperties","Свойства"),action("actionSourceUp","Переместить вверх"),action("actionSourceDown","Переместить вниз")];
-  state.actions=[action("actionAdvAudioProperties","Расширенные свойства аудио")];
+  state.actions=[action("actionAdvAudioProperties","Расширенные свойства аудио"),action("actionMixerToolbarToggleLayout","Изменить ориентацию микшера")];
+  state.workspace={verticalMixer:new URLSearchParams(location.search).get("mixer")==="vertical",lockDocks:false};
+  state.mixerToolbar={hidden:{id:"mixer-hidden",text:"Скрыто: 0",enabled:false,checked:false},optionsText:"Параметры",layoutAction:"actionMixerToolbarToggleLayout"};
   state.sources.forEach(x=>{x.owner="scene-1";x.depth=0;});
   state.audio=[{uuid:"audio-1",name:"Звук рабочего стола",volume:.85,db:-3.2,muted:false,monitoring:0,enabled:true,volumeEnabled:true,visible:true},{uuid:"audio-2",name:"Микрофон",volume:.7,db:-6.5,muted:false,monitoring:0,enabled:true,volumeEnabled:true,visible:true}];
+  state.audio.forEach((channel,index)=>{channel.category=index?"Активен":"Глобальный";channel.global=!index;channel.active=true;channel.channels=2;channel.monitoringAvailable=true;});
   state.transitions=[{uuid:"fade",name:"Затухание"},{uuid:"cut",name:"Обрезка"}];state.currentTransition="fade";state.transitionDuration=300;
   state.transitionControls=[{id:"transitionAdd",text:"Добавить переход",enabled:true},{id:"transitionRemove",text:"Удалить переход",enabled:false},{id:"transitionProps",text:"Свойства перехода",enabled:false}];
   state.quickTransitions=[{id:"quick-cut",text:"Обрезка",enabled:true},{id:"quick-fade",text:"Затухание (300 мс)",enabled:true}];state.nativeEditor=true;state.cpu=1.6;
@@ -29,7 +33,8 @@
       if(message.command==="source.visibility"||message.command==="source.lock"){const source=state.sources.find(x=>x.id===message.args.id);if(source)source[message.command==="source.lock"?"locked":"visible"]=message.args.value;}
       if(message.command==="source.rename"){const source=state.sources.find(x=>x.id===message.args.id);if(source)source.name=message.args.name;}
       if(message.command==="scene.rename"){const scene=state.scenes.find(x=>x.uuid===message.args.uuid);if(scene)scene.name=message.args.name;}
-      if(message.command.startsWith("audio.")){const source=state.audio.find(x=>x.uuid===message.args.uuid);if(source){if(message.command==="audio.volume")source.volume=message.args.value;if(message.command==="audio.mute")source.muted=message.args.value;if(message.command==="audio.monitor")source.monitoring=message.args.value;}}
+      if(message.command.startsWith("audio.")){const source=state.audio.find(x=>x.uuid===message.args.uuid);if(source){if(message.command==="audio.volume"){undoAudio={uuid:source.uuid,volume:source.volume,db:source.db};source.volume=message.args.value;source.db=source.volume<=0?-100:source.volume>=1?0:6-102*Math.pow(17,-source.volume);}if(message.command==="audio.mute")source.muted=message.args.value;if(message.command==="audio.monitor")source.monitoring=message.args.value;}}
+      if(message.command==="action.invoke"&&message.args.id==="actionMixerToolbarToggleLayout")state.workspace.verticalMixer=!state.workspace.verticalMixer;
       if(message.command==="transition.select")state.currentTransition=message.args.uuid;
       if(message.command==="transition.duration")state.transitionDuration=message.args.value;
       if(message.command==="control.click"&&message.args.id==="modeSwitch")state.studioMode=!state.studioMode;
@@ -48,4 +53,12 @@
     },
   };
   window.addEventListener("load", publish);
+  // Model a native Undo/state publication without changing browser focus.
+  // Actual libobs undo is covered separately by audio-integration.inl.
+  document.addEventListener("keydown",event=>{
+    if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"&&undoAudio){
+      event.preventDefault();const source=state.audio.find(channel=>channel.uuid===undoAudio.uuid);
+      if(source)Object.assign(source,undoAudio);undoAudio=null;publish();
+    }
+  });
 })();

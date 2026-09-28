@@ -46,4 +46,10 @@ assert.ok(prevented && requests.at(-1).name === "dialog.wheel" && requests.at(-1
 sandbox.innerWidth = 640; sandbox.innerHeight = 420;
 events.get("resize")();
 assert.equal(root.style.transform, "scale(0.5, 0.5)", "resize reapplies geometry without awaiting native polling");
+render({ width: 1280, height: 840, nodes: [{ id: "panel", type: "panel", enabled: true,
+  background: "#252833", frameWidth: 12, decoration: "data:image/png;base64,YQ==",
+  rect: { x: 0, y: 0, width: 200, height: 100 }, clip: { x: 0, y: 0, width: 200, height: 100 } }] });
+const panel = root.children.at(-1);
+assert.equal(panel.style.border, "none", "QSS layout insets do not become a solid CSS border");
+assert.match(panel.style.backgroundImage || "", /YQ==/, "native panel decoration supplies the actual thin border and rounded corners");
 console.log("PASS: dialog viewport scaling, inverse wheel targeting, and resize");

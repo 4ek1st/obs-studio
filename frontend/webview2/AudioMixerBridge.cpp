@@ -5,6 +5,10 @@
 #include <util/config-file.h>
 
 #include <QLayout>
+#include <QBuffer>
+#include <QColor>
+#include <QHash>
+#include <QLabel>
 #include <QPointer>
 #include <QSignalBlocker>
 #include <QThread>
@@ -161,6 +165,17 @@ QJsonArray LevelMeter::peaks() const
 	return result;
 }
 
+int LevelMeter::channelCount() const
+{
+	if (!impl->meter)
+		return 0;
+	const int channels = std::clamp(obs_volmeter_get_nr_channels(impl->meter), 0, MAX_AUDIO_CHANNELS);
+	if (channels)
+		return channels;
+	obs_audio_info info{};
+	return obs_get_audio_info(&info) && info.speakers == SPEAKERS_MONO ? 1 : 2;
+}
+
 void LevelMeter::setTruePeak(bool enabled)
 {
 	if (impl->meter && impl->truePeak != enabled) {
@@ -179,8 +194,24 @@ struct AudioMixerBridge::Impl {
 	QPointer<QObject> root;
 	std::map<QString, Entry> entries;
 	std::vector<QString> order;
+	QHash<qint64, QString> icons;
 
 	explicit Impl(QObject *root_) : root(root_) {}
+
+	QString iconData(const QIcon &icon)
+	{
+		if (icon.isNull())
+			return {};
+		if (!icons.contains(icon.cacheKey())) {
+			if (icons.size() > 64)
+				icons.clear();
+			QByteArray bytes;
+			QBuffer buffer(&bytes);
+			if (buffer.open(QIODevice::WriteOnly) && icon.pixmap(32, 32).save(&buffer, "PNG"))
+				icons.insert(icon.cacheKey(), QStringLiteral("data:image/png;base64,") + QString::fromLatin1(bytes.toBase64()));
+		}
+		return icons.value(icon.cacheKey());
+	}
 
 	void refresh()
 	{
@@ -253,7 +284,7 @@ QJsonArray AudioMixerBridge::snapshot()
 		const bool locked = obs_data_get_bool(settings, "volume_locked");
 		const auto &status = control->mixerStatus();
 		const double deflection = slider ? obs_fader_get_deflection(slider->fad) : 0.0;
-		result.append(QJsonObject{
+		QJsonObject channel{
 			{"uuid", uuid},
 			{"name", QString::fromUtf8(obs_source_get_name(source))},
 			{"volume", std::isfinite(deflection) ? std::clamp(deflection, 0.0, 1.0) : 0.0},
@@ -273,7 +304,54 @@ QJsonArray AudioMixerBridge::snapshot()
 			{"preview", status.has(VolumeControl::MixerStatus::Preview)},
 			{"active", obs_source_active(source) && obs_source_audio_active(source)},
 			{"unassigned", !(obs_source_get_audio_mixers(source) & ((1 << MAX_AUDIO_MIXES) - 1))},
-		});
+			{"channels", entry.meter->channelCount()},
+			{"preferredWidth", std::clamp(control->sizeHint().width(), 70, 110)},
+		};
+		// Read the native presentation, including localized status and theme icons.
+		// Do not infer a category from names or duplicate the mixer's grouping rules.
+		for (auto *label : control->findChildren<QLabel *>()) {
+			if (label->property("class").toStringList().join(' ').split(' ', Qt::SkipEmptyParts).contains("mixer-category")) {
+				channel.insert("category", label->text());
+				channel.insert("categoryColor", label->palette().color(QPalette::WindowText).name());
+				channel.insert("categoryBackground", label->palette().color(QPalette::Window).name());
+			} else if (label->objectName() == QStringLiteral("volLabel")) {
+				channel.insert("dbText", label->text());
+			}
+		}
+		for (auto *button : control->findChildren<QPushButton *>()) {
+			const auto classes = button->property("class").toStringList().join(' ').split(' ', Qt::SkipEmptyParts);
+			const QString prefix = classes.contains("btn-mute") ? QStringLiteral("mute") :
+				classes.contains("btn-monitor") ? QStringLiteral("monitor") : QString();
+			if (!prefix.isEmpty()) {
+				channel.insert(prefix + "Icon", impl->iconData(button->icon()));
+				channel.insert(prefix + "Tooltip", button->toolTip());
+				channel.insert(prefix + "Enabled", button->isEnabled());
+			}
+		}
+		for (auto *widget : control->findChildren<QWidget *>()) {
+			if (!widget->inherits("VolumeMeter"))
+				continue;
+			QJsonObject colors;
+			for (const auto *property : {"backgroundNominalColor", "backgroundWarningColor", "backgroundErrorColor",
+				"foregroundNominalColor", "foregroundWarningColor", "foregroundErrorColor",
+				"backgroundNominalColorDisabled", "backgroundWarningColorDisabled", "backgroundErrorColorDisabled",
+				"foregroundNominalColorDisabled", "foregroundWarningColorDisabled", "foregroundErrorColorDisabled",
+				"majorTickColor", "minorTickColor"}) {
+				const auto color = widget->property(property).value<QColor>();
+				if (color.isValid())
+					colors.insert(QLatin1String(property), color.name());
+			}
+			channel.insert("meterColors", colors);
+			break;
+		}
+		QJsonArray ticks;
+		if (slider) {
+			const auto convert = obs_fader_db_to_def(slider->fad);
+			for (int db = -10; db >= -90; db -= 10)
+				ticks.append(double(convert(float(db))));
+		}
+		channel.insert("faderTicks", ticks);
+		result.append(channel);
 	}
 	return result;
 }

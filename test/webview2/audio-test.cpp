@@ -118,9 +118,11 @@ int main(int argc, char **argv)
 		check(source != nullptr, "real audio fixture source is created");
 		LevelMeter meter(source);
 		check(meter.peaks().isEmpty(), "meter has no fabricated samples before audio arrives");
+		check(meter.channelCount() == 2, "idle stereo source keeps the native default meter channel count");
 		for (int i = 0; i < 8; ++i)
 			OutputBlock(source, 0.5f);
 		const auto peaks = meter.peaks();
+		check(meter.channelCount() == peaks.size(), "meter channel geometry matches the real PCM callback");
 		check(peaks.size() == 2 && std::abs(peaks[0].toDouble() + 6.0206) < 0.02 &&
 			      std::abs(peaks[1].toDouble() + 6.0206) < 0.02,
 		      "real stereo half-amplitude PCM produces minus six dB channel peaks");

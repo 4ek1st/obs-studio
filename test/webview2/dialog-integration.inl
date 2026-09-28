@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QImageReader>
 #include <QLabel>
 #include <QListWidget>
@@ -16,8 +17,10 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScreen>
+#include <QSaveFile>
 #include <QTimer>
 #include <functional>
+#include "capture-integration.inl"
 
 namespace {
 class DialogWorkflowChecks : public QObject {
@@ -70,6 +73,24 @@ class DialogWorkflowChecks : public QObject {
 			guard->check(web->geometry() == target->rect(), "WebView2 dialog overlay covers the complete native content rectangle");
 			const auto expected = target->size() * target->devicePixelRatioF();
 			const auto path = QDir(directory).filePath(name + ".png");
+			if (name == QStringLiteral("OBSBasicSourceSelect")) {
+				// Pair the two renderers on the exact same live dialog and layout.
+				// No event loop turn occurs while the web child is temporarily hidden.
+				// GPU widgets are not hidden/reparented by this diagnostic.
+				const bool visible = web->isVisible();
+				const QPointer<QWidget> focused = QApplication::focusWidget();
+				web->hide();
+				const auto native = target->grab();
+				if (visible) { web->show(); web->raise(); }
+				if (focused && focused->isVisible()) focused->setFocus(Qt::OtherFocusReason);
+				guard->check(native.save(QDir(directory).filePath(name + "-native.png")),
+					"Native source picker appearance is captured beside the same HTML dialog");
+				OBSWeb::QtDialogBridge bridge(target);
+				QSaveFile snapshot(QDir(directory).filePath(name + ".json"));
+				const auto bytes = QJsonDocument(bridge.snapshot()).toJson();
+				guard->check(snapshot.open(QIODevice::WriteOnly) && snapshot.write(bytes) == bytes.size() && snapshot.commit(),
+					"Source picker widget snapshot is saved for exact native and HTML comparison");
+			}
 			web->capturePreview(path, [guard, next, expected, path](bool saved) {
 				if (!guard) return;
 				guard->check(saved, "Actual WebView2 dialog rendering is captured successfully");
@@ -277,7 +298,7 @@ class DialogWorkflowChecks : public QObject {
 				OBSWeb::QtDialogBridge bridge(audio);
 				check(!bridge.snapshot().value("nodes").toArray().isEmpty(), "Advanced Audio Properties has a live HTML widget snapshot");
 				command(bridge, "dialog.key", {{"key", "Escape"}}, "Advanced Audio Properties closes through native Escape handling");
-				finish();
+				RunCaptureDialogChecks(main, check, [this] { finish(); });
 			});
 			action("actionAdvAudioProperties");
 		});

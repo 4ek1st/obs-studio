@@ -1,6 +1,138 @@
 // Member of OBSWebView2; only compiled for the disposable portable test build.
+void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
+{
+    const QRect video = preview->geometry().translated(-browser->pos());
+    const QRect menu(video.topLeft() + QPoint(12, 12), QSize(70, 50));
+    QJsonObject bounds{{"target", "preview"}, {"x", video.x()}, {"y", video.y()},
+        {"width", video.width()}, {"height", video.height()}, {"viewportWidth", browser->width()},
+        {"viewportHeight", browser->height()}, {"visible", true},
+        {"overlays", QJsonArray{QJsonObject{{"x", menu.x()}, {"y", menu.y()},
+            {"width", menu.width()}, {"height", menu.height()}}}}};
+    auto *display = preview->GetDisplay();
+    execute({{"id", "overlay-live-test"}, {"command", "preview.bounds"}, {"args", bounds}});
+    check(lastTestReply.value("ok").toBool() && preview->isVisible() && display &&
+          preview->GetDisplay() == display && obs_display_enabled(display),
+          "HTML menu bounds preserve the visible enabled native GPU display and its identity");
+    check(browser->mask().contains(menu.center()) && !browser->mask().contains(video.bottomRight() - QPoint(12, 12)),
+          "Browser mask covers the menu overlap while leaving uncovered GPU video visible");
+    bounds.insert("overlays", QJsonArray{});
+    execute({{"id", "overlay-close-test"}, {"command", "preview.bounds"}, {"args", bounds}});
+    check(!browser->mask().contains(menu.center()) && preview->GetDisplay() == display,
+          "Closing the HTML menu restores its native video aperture without replacing the display");
+
+    auto *dock = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
+    auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
+    check(dock && lock, "Native Controls dock and dock lock action are available");
+    if (!dock || !lock) { done(); return; }
+    const bool wasLocked = lock->isChecked();
+    const bool wasFloating = dock->isFloating();
+    const bool wasHidden = dock->isHidden();
+    const bool reusingSurface = bool(webDockViews.value(dock));
+    const QPointer<QWidget> nativeContent = dock->widget();
+    lock->setChecked(false);
+    if (dock->isFloating()) execute({{"id", "dock-preparation-test"}, {"command", "dock.attach"},
+        {"args", QJsonObject{{"name", "controlsDock"}}}});
+    lock->setChecked(true);
+    execute({{"id", "dock-lock-test"}, {"command", "dock.detach"}, {"args", QJsonObject{{"name", "controlsDock"}}}});
+    check(!lastTestReply.value("ok").toBool() && !dock->isFloating(),
+          "Locked workspace rejects a core panel detach without changing its native dock state");
+    lock->setChecked(false);
+    execute({{"id", "dock-detach-test"}, {"command", "dock.detach"},
+        {"args", QJsonObject{{"name", "controlsDock"}, {"width", 360}, {"height", 420}}}});
+    const QPointer<WebView2Widget> surface = webDockViews.value(dock);
+    check(lastTestReply.value("ok").toBool() && dock->isFloating() && dock->isVisible() && surface &&
+          dock->widget() == nativeContent, "Detaching Controls creates a WebView while preserving its native controller widget");
+    auto completed = std::make_shared<bool>(false);
+    auto finish = [this, dock = QPointer<QDockWidget>(dock), lock = QPointer<QAction>(lock),
+                   wasLocked, wasFloating, wasHidden, completed, done] {
+        if (*completed) return;
+        *completed = true;
+        if (lock) lock->setChecked(false);
+        if (dock) {
+            execute({{"id", "dock-cleanup-test"}, {"command", wasFloating ? "dock.detach" : "dock.attach"},
+                {"args", QJsonObject{{"name", "controlsDock"}}}});
+            if (wasHidden) dock->hide();
+        }
+        if (lock) lock->setChecked(wasLocked);
+        browser->postMessage({{"version", 1}, {"event", "viewport.invalidate"}, {"data", QJsonObject{}}});
+        done();
+    };
+    if (!surface) { finish(); return; }
+    QTimer::singleShot(15000, this, [check, completed, finish] {
+        if (!*completed) { check(false, "Floating Controls WebView loads before the timeout"); finish(); }
+    });
+    auto started = std::make_shared<bool>(false);
+    auto loaded = [this, surface, dock = QPointer<QDockWidget>(dock), nativeContent, check, completed, started, finish] {
+        if (*completed || *started) return;
+        *started = true;
+        check(surface && dock && surface->isVisible(), "Floating Controls loads the real WebView document");
+        QTimer::singleShot(300, this, [this, surface, dock, nativeContent, check, completed, finish] {
+            if (*completed) return;
+            if (!surface || !dock) { check(false, "Floating Controls survives document initialization"); finish(); return; }
+            const auto children = dock->widget()->findChildren<WebView2Widget *>(QString(), Qt::FindDirectChildrenOnly);
+            check(children.size() == 1 && children.first() == surface &&
+                  surface->objectName() == QStringLiteral("obsWebView2DockSurface"),
+                  "Core floating panel has exactly one workspace WebView and no generic dialog overlay");
+            const auto artifacts = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
+            const auto png = artifacts.isEmpty() ? QDir::temp().filePath(QStringLiteral("obs-webview2-floating-%1.png").arg(QCoreApplication::applicationPid())) :
+                QDir(artifacts).filePath(QStringLiteral("floating-controls.png"));
+            surface->capturePreview(png, [this, surface, dock, nativeContent, check, completed, finish, png, artifacts](bool saved) {
+                if (*completed) return;
+                const QImage pixels(png);
+                bool varied = false;
+                if (!pixels.isNull()) {
+                    const auto first = pixels.pixel(0, 0);
+                    for (int y = 0; y < pixels.height() && !varied; y += 3)
+                        for (int x = 0; x < pixels.width() && !varied; x += 3) varied |= pixels.pixel(x, y) != first;
+                }
+                check(saved && surface && !pixels.isNull() && pixels.width() > 100 && pixels.height() > 100 && varied &&
+                      qAbs(pixels.width() - qRound(surface->width() * surface->devicePixelRatioF())) <= 2 &&
+                      qAbs(pixels.height() - qRound(surface->height() * surface->devicePixelRatioF())) <= 2,
+                      "Floating Controls renders a populated Chromium image at its real surface size");
+                if (artifacts.isEmpty()) QFile::remove(png);
+                if (!surface || !dock) { finish(); return; }
+                const auto geometry = preview->geometry();
+                surface->messageReceived({{"id", "floating-bounds-test"}, {"command", "preview.bounds"},
+                    {"args", QJsonObject{{"visible", false}}}});
+                check(preview->geometry() == geometry && preview->isVisible(),
+                      "Floating document cannot move or hide the main native preview");
+                const bool studio = obs_frontend_preview_program_mode_active();
+                surface->messageReceived({{"id", "floating-control-test"}, {"command", "control.click"},
+                    {"args", QJsonObject{{"id", "modeSwitch"}, {"context", snapshot().value("context")}}}});
+                check(lastTestReply.value("ok").toBool() && obs_frontend_preview_program_mode_active() != studio,
+                      "Floating Controls command route executes the original Studio Mode button");
+                obs_frontend_set_preview_program_mode(studio);
+                restoreSurfaces();
+                check(surface->isHidden() && dock->widget() == nativeContent,
+                      "Returning to native UI hides the floating WebView and retains its original dock content");
+                resumeFrontend();
+                check(surface->isVisible() && dock->isFloating(), "Resuming WebView restores the same floating panel surface");
+                surface->messageReceived({{"id", "floating-attach-test"}, {"command", "dock.attach"},
+                    {"args", QJsonObject{{"name", "controlsDock"}}}});
+                check(lastTestReply.value("ok").toBool() && !dock->isFloating() && surface->isHidden() && dock->widget() == nativeContent,
+                      "Floating Controls route reattaches its dock without destroying controller content");
+                const QPointer<QObject> resizeFilter = surface->findChild<QObject *>(QStringLiteral("obsWebView2DockResizeFilter"));
+                check(resizeFilter, "Floating resize filter belongs to its browser surface");
+                destroyWebDocks();
+                check(surface.isNull() && resizeFilter.isNull() && webDockViews.isEmpty() && dock->widget() == nativeContent,
+                      "Frontend disposal destroys floating browser controllers and filters while retaining native content");
+                execute({{"id", "dock-recreate-test"}, {"command", "dock.detach"},
+                    {"args", QJsonObject{{"name", "controlsDock"}}}});
+                const auto recreated = dock->widget()->findChildren<WebView2Widget *>(QString(), Qt::FindDirectChildrenOnly);
+                check(lastTestReply.value("ok").toBool() && recreated.size() == 1 && webDockViews.value(dock) == recreated.first(),
+                      "Creating a panel after frontend disposal produces exactly one fresh browser host");
+                finish();
+            });
+        });
+    };
+    connect(surface, &WebView2Widget::ready, this, loaded);
+    // A restored floating panel may have completed navigation before this test.
+    if (reusingSurface) QTimer::singleShot(300, this, loaded);
+}
+
 void runWorkspaceChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
 {
+    done = [this, check, complete = std::move(done)] { runOverlayAndFloatingDockChecks(check, complete); };
     struct WorkspaceFixture {
         OBSSceneAutoRelease scene{obs_scene_create("WebView Workspace Editing")};
         OBSSourceAutoRelease a{obs_source_create("color_source_v3", "Workspace red", nullptr, nullptr)};

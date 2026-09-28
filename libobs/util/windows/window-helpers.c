@@ -273,7 +273,19 @@ static void add_window(obs_property_t *p, HWND hwnd, add_window_cb callback)
 	dstr_cat(&encoded, ":");
 	dstr_cat_dstr(&encoded, &exe);
 
-	obs_property_list_add_string(p, desc.array, encoded.array);
+	/* Several HWNDs (notably Shell TabProxyWindow instances) can share the
+	 * persisted title/class/executable selector. They cannot be selected
+	 * independently, while equal labels with different selectors must remain. */
+	bool present = false;
+	for (size_t i = 0; i < obs_property_list_item_count(p); ++i) {
+		const char *value = obs_property_list_item_string(p, i);
+		if (value && strcmp(value, encoded.array) == 0) {
+			present = true;
+			break;
+		}
+	}
+	if (!present)
+		obs_property_list_add_string(p, desc.array, encoded.array);
 
 	dstr_free(&encoded);
 	dstr_free(&desc);

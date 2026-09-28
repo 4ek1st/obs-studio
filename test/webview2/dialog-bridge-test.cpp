@@ -7,6 +7,8 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFontMetricsF>
+#include <QFrame>
 #include <QDockWidget>
 #include <QJsonArray>
 #include <QLineEdit>
@@ -23,7 +25,9 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QIntValidator>
+#include <QImage>
 #include <QStandardItemModel>
+#include <QStyleOptionButton>
 #include <QTabWidget>
 #include <QToolButton>
 #include <QTimer>
@@ -89,6 +93,24 @@ int main(int argc, char **argv)
 		std::cerr << "Theme values: " << theme.value("window").toString().toStdString() << ' ' << theme.value("base").toString().toStdString() << ' ' << theme.value("fontSize").toInt() << '\n';
 	check(theme.value("window") == "#123456" && theme.value("base") == "#234567" && theme.value("fontSize") == 17,
 	      "HTML receives the live Qt palette and logical font size");
+	checkBox->setStyleSheet("QCheckBox { font-size:11px; font-weight:600; font-style:italic; spacing:2px; }");
+	const auto checkNode = node(bridge, "check");
+	const auto checkFont = checkNode.value("font").toObject();
+	check(checkFont.value("pixelSize") == 11 && checkFont.value("weight") == 600 && checkFont.value("italic").toBool() &&
+	      checkFont.value("lineHeight").toDouble() == QFontMetricsF(checkBox->font()).lineSpacing(),
+	      "a widget's stylesheet font overrides the dialog font in HTML metrics");
+	QStyleOptionButton checkStyle; checkStyle.initFrom(checkBox); checkStyle.text = checkBox->text();
+	const auto expectedIndicator = checkBox->style()->subElementRect(QStyle::SE_CheckBoxIndicator, &checkStyle, checkBox);
+	const auto expectedText = checkBox->style()->subElementRect(QStyle::SE_CheckBoxContents, &checkStyle, checkBox);
+	auto asRect = [](const QJsonValue &value) { const auto r = value.toObject(); return QRect(r.value("x").toInt(), r.value("y").toInt(), r.value("width").toInt(), r.value("height").toInt()); };
+	check(asRect(checkNode.value("indicatorRect")) == expectedIndicator && asRect(checkNode.value("textRect")) == expectedText,
+	      "checkbox layout follows native style indicator and text rectangles instead of fixed browser gaps");
+	check(checkNode.value("nativeTextWidth").toDouble() == QFontMetricsF(checkBox->font()).horizontalAdvance(checkBox->text()),
+	      "checkbox text advance permits exact fitting across browser font metrics");
+	checkBox->setText("&Capture && monitor");
+	check(node(bridge, "check").value("nativeTextWidth").toDouble() ==
+	      QFontMetricsF(checkBox->font()).horizontalAdvance("Capture & monitor"),
+	      "checkbox text advance excludes Qt mnemonics but retains literal ampersands");
 	QString error;
 	auto run = [&](const char *command, QJsonObject args) { return bridge.execute(QString::fromLatin1(command), args, error); };
 	const auto editId = node(bridge, "edit").value("id");
@@ -220,11 +242,37 @@ int main(int argc, char **argv)
 	scrolling.resize(320, 180);
 	auto *scrollLayout = new QVBoxLayout(&scrolling);
 	auto *area = new QScrollArea; area->setObjectName("settingsScroll"); area->setWidgetResizable(true);
+	area->verticalScrollBar()->setObjectName("propertiesScrollBar");
 	auto *content = new QWidget; content->setMinimumSize(250, 1600); area->setWidget(content); scrollLayout->addWidget(area);
 	scrolling.show(); app.processEvents();
 	OBSWeb::QtDialogBridge scrollBridge(&scrolling);
 	const auto scrollNode = node(scrollBridge, "settingsScroll");
 	check(scrollNode.value("type") == "scrollArea", "settings scroll area is represented as a wheel target");
+	check(node(scrollBridge, "propertiesScrollBar").value("page").toInt() == area->verticalScrollBar()->pageStep(),
+	      "scrollbar exposes native page size for proportional browser thumb geometry");
+	auto *styledScroll = area->verticalScrollBar();
+	styledScroll->setStyleSheet("QScrollBar:vertical { background:#123456; width:18px; margin:3px; border:0; }"
+		"QScrollBar::handle:vertical { background:#2468ac; min-height:40px; }"
+		"QScrollBar::handle:vertical:hover { background:#468ace; }"
+		"QScrollBar::handle:vertical:pressed { background:#689cee; }"
+		"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; border:0; background:none; }"
+		"QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical { background:none; }");
+	app.processEvents();
+	const auto nativeScroll = node(scrollBridge, "propertiesScrollBar").value("nativeStyle").toObject();
+	const auto thumbRect = asRect(nativeScroll.value("thumbRect"));
+	check(thumbRect.height() >= 40 && asRect(nativeScroll.value("grooveRect")).height() < styledScroll->height(),
+	      "scrollbar geometry preserves the native QSS minimum handle and groove margins");
+	auto imageFromUri = [](const QJsonValue &value) { return QImage::fromData(QByteArray::fromBase64(value.toString().section(',', 1).toLatin1())); };
+	const auto normalScroll = imageFromUri(nativeScroll.value("normal"));
+	const auto hoverScroll = imageFromUri(nativeScroll.value("hover"));
+	const auto pressedScroll = imageFromUri(nativeScroll.value("pressed"));
+	const auto thumbPixel = thumbRect.center() * styledScroll->devicePixelRatioF();
+	check(!normalScroll.isNull() && normalScroll.pixelColor(thumbPixel) == QColor("#2468ac") &&
+	      !hoverScroll.isNull() && hoverScroll.pixelColor(thumbPixel) == QColor("#468ace") &&
+	      !pressedScroll.isNull() && pressedScroll.pixelColor(thumbPixel) == QColor("#689cee"),
+	      "scrollbar normal hover and pressed visuals come from real QSS subcontrol painting");
+	check(!normalScroll.isNull() && normalScroll.pixelColor(thumbPixel) == styledScroll->grab().toImage().pixelColor(thumbPixel),
+	      "serialized scrollbar paint matches the actual native widget at the handle");
 	check(scrollBridge.execute("dialog.wheel", {{"id", scrollNode.value("id")}, {"deltaY", 120}, {"deltaX", 0}}, error) &&
 	      area->verticalScrollBar()->value() > 0, "wheel over a settings form moves its real Qt scroll position");
 	scrolling.hide();
@@ -252,6 +300,17 @@ int main(int argc, char **argv)
 	      "redocking retires the web overlay without reparenting native controllers");
 	dock->setFloating(true); app.processEvents(); app.processEvents();
 	check(dockContent->findChildren<WebView2Widget *>().size() == 1, "floating again installs exactly one content renderer");
+	QPointer<WebView2Widget> replacedSurface = dockContent->findChild<WebView2Widget *>("obsWebView2DialogSurface", Qt::FindDirectChildrenOnly);
+	dockContent->setProperty("_obsWebView2ExternalSurface", true);
+	auto *externalSurface = new WebView2Widget(dockContent, "missing-test-assets", "unused-test-profile");
+	externalSurface->setObjectName("coreDockWebView");
+	app.processEvents(); QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+	check(!replacedSurface && dockContent->findChildren<WebView2Widget *>().size() == 1 && externalSurface->parentWidget() == dockContent,
+	      "claiming a floating dock for a dedicated renderer retires the generic overlay");
+	dock->setFloating(false); app.processEvents(); dock->setFloating(true); app.processEvents(); app.processEvents();
+	check(dockContent->findChildren<WebView2Widget *>().size() == 1 &&
+	      !dockContent->findChild<WebView2Widget *>("obsWebView2DialogSurface", Qt::FindDirectChildrenOnly),
+	      "floating a core dock with a dedicated renderer never adds a second WebView");
 	dockingHost.hide();
 	QLineEdit rootEditor("Dock leaf"); rootEditor.setObjectName("rootEditor"); rootEditor.show();
 	OBSWeb::QtDialogBridge rootEditorBridge(&rootEditor);
@@ -267,6 +326,48 @@ int main(int argc, char **argv)
 	check(opaqueWeb && !opaqueWeb->isVisible() && opaque->isVisible(),
 	      "an entirely native content area hides HTML instead of clearing its empty mask and covering controls");
 	opaqueDialog.hide();
+	QDialog panels;
+	auto *panelsLayout = new QVBoxLayout(&panels);
+	auto *styledPanel = new QFrame; styledPanel->setObjectName("styledPanel"); styledPanel->setMinimumSize(220, 50);
+	styledPanel->setStyleSheet("QFrame#styledPanel { background-color:#252833; border:2px solid #434650; }");
+	panelsLayout->addWidget(styledPanel);
+	auto *paddedPanel = new QFrame; paddedPanel->setObjectName("paddedPanel"); paddedPanel->setFrameShape(QFrame::NoFrame);
+	paddedPanel->setMinimumSize(220, 70);
+	paddedPanel->setStyleSheet("QFrame#paddedPanel { background:#252833; border:1px solid #556677; padding:8px; margin:3px; border-radius:4px; }");
+	panelsLayout->addWidget(paddedPanel);
+	auto *swatch = new QLabel("#ffd1d1d1"); swatch->setObjectName("colorSwatch");
+	swatch->setFrameStyle(QFrame::Sunken | QFrame::Panel);
+	swatch->setPalette(QPalette(QColor("#d1d1d1")));
+	swatch->setStyleSheet("background-color:#d1d1d1; color:#000000;");
+	swatch->setAutoFillBackground(true); swatch->setAlignment(Qt::AlignCenter);
+	panelsLayout->addWidget(swatch);
+	auto *transparentPanel = new QFrame; transparentPanel->setObjectName("transparentPanel"); transparentPanel->setFrameShape(QFrame::NoFrame);
+	auto *transparentLayout = new QVBoxLayout(transparentPanel);
+	auto *disabledLabel = new QLabel("Disabled caption"); disabledLabel->setObjectName("disabledCaption");
+	QPalette labelPalette = disabledLabel->palette(); labelPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor("#818293"));
+	disabledLabel->setPalette(labelPalette); disabledLabel->setDisabled(true); transparentLayout->addWidget(disabledLabel);
+	panelsLayout->addWidget(transparentPanel); panels.show(); app.processEvents();
+	OBSWeb::QtDialogBridge panelBridge(&panels);
+	const auto panelNode = node(panelBridge, "styledPanel");
+	check(panelNode.value("type") == "panel" && panelNode.value("background") == "#252833" && panelNode.value("frameWidth") == 2,
+	      "styled container preserves its own background and native frame width");
+	const auto paddedNode = node(panelBridge, "paddedPanel");
+	const auto paddedPaint = imageFromUri(paddedNode.value("decoration"));
+	check(paddedNode.value("frameWidth").toInt() > 1 && !paddedPaint.isNull() &&
+	      paddedPaint.pixelColor(paddedPaint.width() / 2, 3) == QColor("#556677") &&
+	      paddedPaint.pixelColor(paddedPaint.width() / 2, 5) == QColor("#252833") && paddedPaint.pixelColor(0, 0).alpha() == 0,
+	      "styled panel padding and margins are not painted as a thick border");
+	check(node(panelBridge, "transparentPanel").isEmpty(), "transparent grouping container does not gain an opaque HTML panel");
+	check(node(panelBridge, "disabledCaption").value("palette").toObject().value("windowText") == "#818293",
+	      "disabled controls publish their own disabled text palette");
+	const auto swatchNode = node(panelBridge, "colorSwatch");
+	const auto swatchPaint = imageFromUri(swatchNode.value("decoration"));
+	check(swatchNode.value("background") == "#d1d1d1" && swatchNode.value("frameWidth").toInt() == swatch->frameWidth() &&
+	      !swatchPaint.isNull() && swatchPaint.pixelColor(swatchPaint.width() / 2, swatchPaint.height() / 2) == QColor("#d1d1d1"),
+	      "color property QLabel retains its visible swatch background and native frame");
+	check(!node(panelBridge, "disabledCaption").contains("decoration"),
+	      "plain transparent labels do not acquire a painted background");
+	panels.hide();
 	if (!failures) std::cout << "PASS: native dialog edits, activation, model identity, deletion and acceptance\n";
 	return failures ? 1 : 0;
 }

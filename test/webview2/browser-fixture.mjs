@@ -14,6 +14,11 @@ const server = http.createServer(async (request, response) => {
       response.end(await fs.readFile(path.join(directory, "fixtures/browser.js")));
       return;
     }
+    if (["OpenSans-Regular.ttf", "OpenSans-Bold.ttf", "OpenSans-Italic.ttf"].includes(name)) {
+      response.setHeader("Content-Type", "font/ttf");
+      response.end(await fs.readFile(path.resolve(assets, "../../forms/fonts", name)));
+      return;
+    }
     if (!allowed.has(name)) { response.writeHead(404).end(); return; }
     let content = await fs.readFile(path.join(assets, name), "utf8");
     if (name === "index.html")

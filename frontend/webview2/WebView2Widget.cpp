@@ -8,8 +8,10 @@
 #include <QEvent>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QPointer>
 #include <QTimer>
+#include <QWindow>
 #include <Windows.h>
 #include <objbase.h>
 #include <wrl.h>
@@ -36,6 +38,7 @@ WebView2Widget::WebView2Widget(QWidget *parent, QString assetsPath, QString prof
 	impl->assets = QDir(assetsPath).absolutePath();
 	impl->profile = QDir(profilePath).absolutePath();
 	impl->document = std::move(document);
+	setAttribute(Qt::WA_DontCreateNativeAncestors);
 	setAttribute(Qt::WA_NativeWindow);
 	setFocusPolicy(Qt::StrongFocus);
 	QTimer::singleShot(0, this, [this] { initialize(); });
@@ -288,12 +291,29 @@ void WebView2Widget::capturePreview(QString path, std::function<void(bool)> done
 		auto rectJson = [](const QRect &rect) {
 			return QJsonObject{{"x", rect.x()}, {"y", rect.y()}, {"width", rect.width()}, {"height", rect.height()}};
 		};
-		const QJsonObject geometry{{"document", impl->document}, {"widget", rectJson(this->geometry())},
+		QJsonObject geometry{{"document", impl->document}, {"widget", rectJson(this->geometry())},
 			{"parent", rectJson(parentWidget() ? parentWidget()->rect() : QRect())}, {"dpr", devicePixelRatioF()},
 			{"visible", isVisible()}, {"hidden", isHidden()}, {"mask", rectJson(mask().boundingRect())},
 			{"hwnd", rectJson(QRect(client.left, client.top, client.right-client.left, client.bottom-client.top))},
 			{"controller", rectJson(QRect(controllerBounds.left, controllerBounds.top,
 				controllerBounds.right-controllerBounds.left, controllerBounds.bottom-controllerBounds.top))}};
+		QJsonArray nativeChildren;
+		if (auto *parent = parentWidget()) {
+			for (auto *widget : parent->findChildren<QWidget *>()) {
+				if (widget == this || !widget->testAttribute(Qt::WA_NativeWindow) || !widget->internalWinId()) continue;
+				const HWND child = reinterpret_cast<HWND>(widget->internalWinId());
+				RECT childClient{};
+				GetClientRect(child, &childClient);
+				POINT origin{};
+				MapWindowPoints(child, reinterpret_cast<HWND>(parent->winId()), &origin, 1);
+				nativeChildren.append(QJsonObject{{"class", widget->metaObject()->className()}, {"name", widget->objectName()},
+					{"qt", rectJson(QRect(widget->mapTo(parent, QPoint()), widget->size()))},
+					{"hwnd", rectJson(QRect(origin.x, origin.y, childClient.right, childClient.bottom))},
+					{"visible", widget->isVisible()}});
+				if (nativeChildren.size() >= 512) break;
+			}
+		}
+		geometry.insert("nativeChildren", nativeChildren);
 		QSaveFile trace(path + QStringLiteral(".geometry.json"));
 		if (trace.open(QIODevice::WriteOnly)) {
 			trace.write(QJsonDocument(geometry).toJson());
@@ -357,6 +377,22 @@ void WebView2Widget::queueBoundsUpdate()
 	// Qt show/resize callbacks. Read physical bounds again after Qt applies them.
 	QTimer::singleShot(0, this, [this] {
 		impl->boundsUpdatePending = false;
+		// Creating this native host can promote an alien sibling (for example a
+		// QSplitter) into a native parent. Qt reparents its existing native children
+		// but can retain their old ancestor-relative QWindow position until a resize.
+		// Resync from the unchanged QWidget layout in the new native parent's space.
+		// This preserves the HWND and any GPU swapchain attached to it.
+		if (auto *parent = parentWidget()) {
+			for (auto *widget : parent->findChildren<QWidget *>()) {
+				if (widget == this || widget->isWindow() || widget->window() != window() ||
+				    !widget->internalWinId() || !widget->windowHandle()) continue;
+				auto *nativeParent = widget->nativeParentWidget();
+				if (!nativeParent) continue;
+				const auto position = widget->mapTo(nativeParent, QPoint());
+				if (widget->windowHandle()->position() != position)
+					widget->windowHandle()->setPosition(position);
+			}
+		}
 		updateBounds();
 	});
 }

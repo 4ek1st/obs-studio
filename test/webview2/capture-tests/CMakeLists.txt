@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.28)
+project(obs-capture-fixture LANGUAGES CXX)
+add_executable(obs-capture-fixture WIN32 ../capture-fixture.cpp)
+target_compile_features(obs-capture-fixture PRIVATE cxx_std_17)
+target_link_libraries(obs-capture-fixture PRIVATE d3d11 dxgi)

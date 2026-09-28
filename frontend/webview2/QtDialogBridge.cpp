@@ -5,6 +5,7 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QBuffer>
+#include <QCache>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -12,20 +13,25 @@
 #include <QDialog>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QDynamicPropertyChangeEvent>
 #include <QFileDialog>
 #include <QFocusEvent>
 #include <QFontDialog>
 #include <QFontInfo>
+#include <QFontMetricsF>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QImage>
 #include <QLineEdit>
 #include <QListView>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPersistentModelIndex>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -37,6 +43,9 @@
 #include <QSet>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStyleOptionButton>
+#include <QStyleOptionFrame>
+#include <QStyleOptionSlider>
 #include <QTabBar>
 #include <QTableView>
 #include <QTextDocument>
@@ -53,6 +62,7 @@
 namespace {
 constexpr auto surfaceProperty = "_obsWebView2DialogSurface";
 constexpr auto installedProperty = "_obsWebView2DialogInstaller";
+constexpr auto externalSurfaceProperty = "_obsWebView2ExternalSurface";
 
 QString plainText(const QString &text)
 {
@@ -74,6 +84,48 @@ QString buttonText(QString text)
 QJsonObject rectangle(const QRect &rect)
 {
 	return {{"x", rect.x()}, {"y", rect.y()}, {"width", rect.width()}, {"height", rect.height()}};
+}
+
+QJsonObject fontState(const QWidget *widget)
+{
+	const auto requested = widget->font();
+	const QFontInfo resolved(requested);
+	const int pixels = requested.pixelSize() > 0 ? requested.pixelSize() : resolved.pixelSize() > 0 ? resolved.pixelSize() :
+		std::max(1, qRound(requested.pointSizeF() * widget->logicalDpiY() / 72.0));
+	return {{"family", resolved.family().isEmpty() ? requested.family() : resolved.family()}, {"pixelSize", pixels},
+		{"weight", int(requested.weight())}, {"italic", requested.italic()},
+		{"lineHeight", QFontMetricsF(requested).lineSpacing()}};
+}
+
+QJsonObject paletteState(const QWidget *widget)
+{
+	const auto palette = widget->palette();
+	const auto group = !widget->isEnabled() ? QPalette::Disabled : widget->isActiveWindow() ? QPalette::Active : QPalette::Inactive;
+	return {{"window", palette.color(group, QPalette::Window).name()}, {"windowText", palette.color(group, QPalette::WindowText).name()},
+		{"base", palette.color(group, QPalette::Base).name()}, {"text", palette.color(group, QPalette::Text).name()},
+		{"button", palette.color(group, QPalette::Button).name()}, {"buttonText", palette.color(group, QPalette::ButtonText).name()},
+		{"mid", palette.color(group, QPalette::Mid).name()}, {"highlight", palette.color(group, QPalette::Highlight).name()},
+		{"highlightedText", palette.color(group, QPalette::HighlightedText).name()}};
+}
+
+void choiceGeometry(QAbstractButton *button, bool radio, QJsonObject &data)
+{
+	QStyleOptionButton option;
+	option.initFrom(button);
+	option.text = button->text();
+	option.icon = button->icon();
+	option.iconSize = button->iconSize();
+	option.state |= button->isChecked() ? QStyle::State_On : QStyle::State_Off;
+	if (auto *check = qobject_cast<QCheckBox *>(button); check && check->checkState() == Qt::PartiallyChecked) {
+		option.state &= ~(QStyle::State_On | QStyle::State_Off);
+		option.state |= QStyle::State_NoChange;
+	}
+	if (button->isDown()) option.state |= QStyle::State_Sunken;
+	data.insert("indicatorRect", rectangle(button->style()->subElementRect(
+		radio ? QStyle::SE_RadioButtonIndicator : QStyle::SE_CheckBoxIndicator, &option, button)));
+	data.insert("textRect", rectangle(button->style()->subElementRect(
+		radio ? QStyle::SE_RadioButtonContents : QStyle::SE_CheckBoxContents, &option, button)));
+	data.insert("nativeTextWidth", QFontMetricsF(button->font()).horizontalAdvance(buttonText(button->text())));
 }
 
 QRect visibleRectangle(QWidget *widget, QWidget *dialog)
@@ -113,12 +165,6 @@ void mouseClick(QWidget *widget, QPoint point, Qt::KeyboardModifiers mods, bool 
 	if (guard) QApplication::sendEvent(widget, &release);
 }
 
-QJsonObject scrollState(QScrollBar *scroll)
-{
-	return {{"minimum", scroll->minimum()}, {"maximum", scroll->maximum()}, {"value", scroll->value()},
-		{"page", scroll->pageStep()}};
-}
-
 QAbstractItemView *owningView(QWidget *widget)
 {
 	for (auto *parent = widget->parentWidget(); parent; parent = parent->parentWidget())
@@ -144,6 +190,102 @@ struct QtDialogBridge::Impl {
 	QHash<QString, QPersistentModelIndex> indexes;
 	QHash<QPersistentModelIndex, QString> indexIds;
 	QHash<qint64, QString> icons;
+	struct Raster { QImage pixels; QString uri; };
+	// Compare freshly styled pixels, then reuse PNG encoding. This also catches
+	// inherited QSS and dynamic-property changes without guessing a style cache key.
+	QCache<QString, Raster> rasters{8 * 1024 * 1024};
+
+	template<typename Paint> QString raster(QWidget *widget, const QString &part, Paint paint)
+	{
+		const auto dpr = widget->devicePixelRatioF();
+		QImage pixels(widget->size() * dpr, QImage::Format_ARGB32_Premultiplied);
+		if (pixels.isNull()) return {};
+		pixels.setDevicePixelRatio(dpr);
+		pixels.fill(Qt::transparent);
+		{ QPainter painter(&pixels); paint(painter); }
+		const auto key = identify(widget) + QLatin1Char(':') + part;
+		if (auto *cached = rasters.object(key); cached && cached->pixels == pixels) return cached->uri;
+		QByteArray bytes;
+		QBuffer buffer(&bytes); buffer.open(QIODevice::WriteOnly); pixels.save(&buffer, "PNG");
+		const auto uri = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(bytes.toBase64());
+		rasters.insert(key, new Raster{pixels, uri}, pixels.sizeInBytes() + uri.size() * sizeof(QChar));
+		return uri;
+	}
+
+	QJsonObject scrollbarStyle(QScrollBar *scroll)
+	{
+		QStyleOptionSlider option;
+		option.initFrom(scroll);
+		option.orientation = scroll->orientation();
+		option.minimum = scroll->minimum(); option.maximum = scroll->maximum();
+		option.sliderPosition = scroll->sliderPosition(); option.sliderValue = scroll->value();
+		option.singleStep = scroll->singleStep(); option.pageStep = scroll->pageStep();
+		option.upsideDown = scroll->invertedAppearance();
+		option.subControls = QStyle::SC_All;
+		option.state &= ~(QStyle::State_MouseOver | QStyle::State_Sunken | QStyle::State_Horizontal);
+		if (scroll->orientation() == Qt::Horizontal) option.state |= QStyle::State_Horizontal;
+		auto *style = scroll->style();
+		auto rect = [&](QStyle::SubControl control) { return style->subControlRect(QStyle::CC_ScrollBar, &option, control, scroll); };
+		QJsonObject data{{"thumbRect", rectangle(rect(QStyle::SC_ScrollBarSlider))},
+			{"grooveRect", rectangle(rect(QStyle::SC_ScrollBarGroove))},
+			{"subLineRect", rectangle(rect(QStyle::SC_ScrollBarSubLine))},
+			{"addLineRect", rectangle(rect(QStyle::SC_ScrollBarAddLine))}, {"value", scroll->value()}};
+		const int savedPosition = option.sliderPosition;
+		option.sliderPosition = option.minimum;
+		const auto first = rect(QStyle::SC_ScrollBarSlider);
+		option.sliderPosition = option.maximum;
+		const auto last = rect(QStyle::SC_ScrollBarSlider);
+		option.sliderPosition = savedPosition;
+		data.insert("reversed", scroll->orientation() == Qt::Vertical ? last.y() < first.y() : last.x() < first.x());
+		for (const auto *state : {"normal", "hover", "pressed"}) {
+			auto painted = option;
+			painted.activeSubControls = QStyle::SC_None;
+			if (strcmp(state, "normal") != 0 && scroll->isEnabled()) {
+				painted.state |= QStyle::State_MouseOver;
+				painted.activeSubControls = QStyle::SC_ScrollBarSlider;
+				if (strcmp(state, "pressed") == 0) painted.state |= QStyle::State_Sunken;
+			}
+			data.insert(QString::fromLatin1(state), raster(scroll, QString::fromLatin1(state), [&](QPainter &painter) {
+				style->drawComplexControl(QStyle::CC_ScrollBar, &painted, &painter, scroll);
+			}));
+		}
+		return data;
+	}
+
+	QJsonObject scrollState(QScrollBar *scroll, QWidget *container = nullptr)
+	{
+		QJsonObject data{{"minimum", scroll->minimum()}, {"maximum", scroll->maximum()}, {"value", scroll->value()},
+			{"page", scroll->pageStep()}, {"step", scroll->singleStep()}};
+		if (scroll->isVisible()) data.insert("nativeStyle", scrollbarStyle(scroll));
+		if (container) data.insert("rect", rectangle(QRect(scroll->mapTo(container, QPoint()), scroll->size())));
+		return data;
+	}
+
+	void widgetDecoration(QWidget *widget, QJsonObject &data)
+	{
+		auto *frame = qobject_cast<QFrame *>(widget);
+		const bool background = widget->autoFillBackground() || widget->testAttribute(Qt::WA_StyledBackground);
+		if (!background && (!frame || !frame->frameWidth())) return;
+		if (background) data.insert("background", widget->palette().color(widget->backgroundRole()).name());
+		data.insert("frameWidth", frame ? frame->frameWidth() : 0);
+		data.insert("decoration", raster(widget, QStringLiteral("decoration"), [&](QPainter &painter) {
+			// QSS paints its own background inside its margin/border box. Filling
+			// the whole widget here would incorrectly cover transparent margins.
+			if (widget->autoFillBackground()) painter.fillRect(widget->rect(), widget->palette().brush(widget->backgroundRole()));
+			if (!frame || widget->testAttribute(Qt::WA_StyledBackground)) {
+				QStyleOption option; option.initFrom(widget);
+				widget->style()->drawPrimitive(QStyle::PE_Widget, &option, &painter, widget);
+			}
+			if (!frame) return;
+			QStyleOptionFrame option;
+			option.initFrom(frame); option.rect = frame->frameRect();
+			option.lineWidth = frame->lineWidth(); option.midLineWidth = frame->midLineWidth();
+			option.frameShape = frame->frameShape();
+			if (frame->frameShadow() == QFrame::Sunken) option.state |= QStyle::State_Sunken;
+			else if (frame->frameShadow() == QFrame::Raised) option.state |= QStyle::State_Raised;
+			frame->style()->drawControl(QStyle::CE_ShapedFrame, &option, &painter, frame);
+		}));
+	}
 
 	QString identify(QWidget *widget)
 	{
@@ -220,8 +362,8 @@ struct QtDialogBridge::Impl {
 	{
 		data.insert("type", "items");
 		data.insert("viewport", rectangle(QRect(view->viewport()->mapTo(view, QPoint()), view->viewport()->size())));
-		data.insert("verticalScroll", scrollState(view->verticalScrollBar()));
-		data.insert("horizontalScroll", scrollState(view->horizontalScrollBar()));
+		data.insert("verticalScroll", scrollState(view->verticalScrollBar(), view));
+		data.insert("horizontalScroll", scrollState(view->horizontalScrollBar(), view));
 		data.insert("selectionMode", int(view->selectionMode()));
 		QJsonArray items;
 		const auto bounds = view->viewport()->rect();
@@ -286,7 +428,8 @@ struct QtDialogBridge::Impl {
 				{"class", QString::fromLatin1(widget->metaObject()->className())},
 				{"rect", rectangle(QRect(widget->mapTo(dialog, QPoint()), widget->size()))},
 				{"clip", rectangle(clipped)}, {"enabled", widget->isEnabled()},
-				{"tooltip", plainText(widget->toolTip())}, {"accessibleName", widget->accessibleName()}};
+				{"tooltip", plainText(widget->toolTip())}, {"accessibleName", widget->accessibleName()},
+				{"font", fontState(widget)}, {"palette", paletteState(widget)}};
 			bool atomic = true;
 			if (auto *view = owningView(widget)) data.insert("itemView", identify(view));
 			if (widget->inherits("SourceSelectButton") || widget->inherits("OBSHotkeyLabel") || widget->inherits("BalanceSlider") ||
@@ -295,6 +438,7 @@ struct QtDialogBridge::Impl {
 				data.insert("type", "native");
 			} else if (auto *button = qobject_cast<QAbstractButton *>(widget)) {
 				const bool check = qobject_cast<QCheckBox *>(button), radio = qobject_cast<QRadioButton *>(button);
+				if (check || radio) choiceGeometry(button, radio, data);
 				data.insert("type", check ? "check" : radio ? "radio" : "button");
 				data.insert("text", buttonText(button->text()));
 				data.insert("icon", icon(button->icon()));
@@ -338,6 +482,7 @@ struct QtDialogBridge::Impl {
 				data.insert("text", plainText(label->text()));
 				data.insert("wordWrap", label->wordWrap());
 				data.insert("alignment", int(label->alignment()));
+				widgetDecoration(label, data);
 				if (label->text().isEmpty() && !label->pixmap().isNull()) data.insert("icon", icon(QIcon(label->pixmap())));
 			} else if (auto *bar = qobject_cast<QTabBar *>(widget)) {
 				data.insert("type", "tabs"); data.insert("index", bar->currentIndex());
@@ -363,7 +508,9 @@ struct QtDialogBridge::Impl {
 				atomic = false;
 			} else if (auto *scroll = qobject_cast<QScrollBar *>(widget)) {
 				data.insert("type", "scroll"); data.insert("minimum", scroll->minimum()); data.insert("maximum", scroll->maximum());
-				data.insert("value", scroll->value()); data.insert("step", scroll->singleStep()); data.insert("vertical", scroll->orientation() == Qt::Vertical);
+				data.insert("value", scroll->value()); data.insert("step", scroll->singleStep()); data.insert("page", scroll->pageStep());
+				data.insert("vertical", scroll->orientation() == Qt::Vertical);
+				data.insert("nativeStyle", scrollbarStyle(scroll));
 			} else if (auto *slider = qobject_cast<QAbstractSlider *>(widget)) {
 				data.insert("type", "slider"); data.insert("minimum", slider->minimum()); data.insert("maximum", slider->maximum());
 				data.insert("value", slider->value()); data.insert("step", slider->singleStep()); data.insert("vertical", slider->orientation() == Qt::Vertical);
@@ -379,7 +526,18 @@ struct QtDialogBridge::Impl {
 				if (widget->inherits("OBSQTDisplay") || widget->inherits("OBSBasicPreview") ||
 				    (children.isEmpty() && (!isStandardContainer(widget) || QByteArray(widget->metaObject()->className()) == "QWidget"))) {
 					data.insert("type", "native");
-				} else { atomic = false; }
+				} else {
+					atomic = false;
+					auto *frame = qobject_cast<QFrame *>(widget);
+					const auto background = widget->palette().color(widget->backgroundRole());
+					if ((widget->autoFillBackground() || widget->testAttribute(Qt::WA_StyledBackground) ||
+					     (frame && frame->frameShape() != QFrame::NoFrame)) && background.alpha() == 255) {
+						data.insert("type", "panel");
+						data.insert("background", background.name());
+						data.insert("frameWidth", frame ? frame->frameWidth() : 0);
+						widgetDecoration(widget, data);
+					}
+				}
 			}
 			if (data.contains("type")) nodes.append(data);
 			if (!atomic) collect(widget, nodes);
@@ -401,16 +559,13 @@ QJsonObject QtDialogBridge::snapshot()
 	QJsonArray nodes;
 	impl->collect(impl->dialog, nodes, !qobject_cast<QDialog *>(impl->dialog));
 	const auto palette = impl->dialog->palette();
-	const auto font = QFontInfo(impl->dialog->font());
-	const auto requestedFont = impl->dialog->font();
-	const int fontSize = requestedFont.pixelSize() > 0 ? requestedFont.pixelSize() : font.pixelSize() > 0 ? font.pixelSize() :
-		std::max(1, qRound(requestedFont.pointSizeF() * impl->dialog->logicalDpiY() / 72.0));
+	const auto font = fontState(impl->dialog);
 	const QJsonObject theme{{"window", palette.color(QPalette::Window).name()}, {"windowText", palette.color(QPalette::WindowText).name()},
 		{"base", palette.color(QPalette::Base).name()}, {"text", palette.color(QPalette::Text).name()},
 		{"button", palette.color(QPalette::Button).name()}, {"buttonText", palette.color(QPalette::ButtonText).name()},
 		{"mid", palette.color(QPalette::Mid).name()}, {"highlight", palette.color(QPalette::Highlight).name()},
-		{"highlightedText", palette.color(QPalette::HighlightedText).name()}, {"fontFamily", font.family()},
-		{"fontSize", fontSize}, {"dark", palette.color(QPalette::Window).lightness() < 128}};
+		{"highlightedText", palette.color(QPalette::HighlightedText).name()}, {"fontFamily", font.value("family")},
+		{"fontSize", font.value("pixelSize")}, {"dark", palette.color(QPalette::Window).lightness() < 128}};
 	const auto title = impl->dialog->windowTitle().isEmpty() ? impl->dialog->window()->windowTitle() : impl->dialog->windowTitle();
 	return {{"title", title}, {"width", impl->dialog->width()}, {"height", impl->dialog->height()},
 		{"focus", impl->widgetIds.value(impl->dialog->focusWidget())},
@@ -709,6 +864,10 @@ class DialogInstaller : public QObject {
 
 	void ensureSurface(QWidget *content)
 	{
+		if (content && content->property(externalSurfaceProperty).toBool()) {
+			retireSurface(content);
+			return;
+		}
 		if (!content || !content->isVisible() || content->property(surfaceProperty).toBool() || surfaces.value(content)) return;
 		auto *surface = new DialogSurface(content, assets, profile, this);
 		surfaces.insert(content, surface);
@@ -723,6 +882,7 @@ class DialogInstaller : public QObject {
 	void refreshDock(QDockWidget *dock)
 	{
 		auto *content = dock->isFloating() && dock->isVisible() ? dock->widget() : nullptr;
+		if (content && content->property(externalSurfaceProperty).toBool()) content = nullptr;
 		const auto previous = dockContents.value(dock);
 		if (previous && previous != content) retireSurface(previous);
 		dockContents.insert(dock, content);
@@ -770,6 +930,16 @@ public:
 
 	bool eventFilter(QObject *object, QEvent *event) override
 	{
+		if (event->type() == QEvent::DynamicPropertyChange &&
+		    static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == externalSurfaceProperty) {
+			if (auto *content = qobject_cast<QWidget *>(object)) {
+				if (content->property(externalSurfaceProperty).toBool()) retireSurface(content);
+				if (auto *dock = qobject_cast<QDockWidget *>(content->parentWidget()); dock && dock->widget() == content) {
+					watchDock(dock);
+					queueDock(dock);
+				}
+			}
+		}
 		if (auto *dock = qobject_cast<QDockWidget *>(object)) {
 			if (event->type() == QEvent::Show || event->type() == QEvent::Hide || event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildRemoved) {
 				watchDock(dock);

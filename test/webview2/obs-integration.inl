@@ -25,6 +25,14 @@ void runIntegrationChecks()
 		blog(passed ? LOG_INFO : LOG_ERROR, "[WebView2 test] %s: %s", passed ? "PASS" : "FAIL", name);
 	};
 	check(QApplication::activeModalWidget() == nullptr, "Core-only startup has no plugin error dialog");
+	if (QCoreApplication::arguments().contains(QStringLiteral("--webview2-capture-test"))) {
+		RunCaptureDialogChecks(static_cast<OBSBasic *>(main), check, [this, fixture] {
+			QFile report(QDir(qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS")).filePath("capture-report.json"));
+			if (report.open(QIODevice::WriteOnly)) report.write(QJsonDocument(fixture->checks).toJson());
+			QTimer::singleShot(200, this, &QWidget::close);
+		});
+		return;
+	}
 	if (!fixture->first || !fixture->second || !fixture->a || !fixture->b) {
 		blog(LOG_ERROR, "[WebView2 test] Could not create fixtures");
 		return;
@@ -152,6 +160,7 @@ void runIntegrationChecks()
 				main->removeEventFilter(blocker);
 				delete blocker;
 				RunAudioMixerIntegrationChecks(main, check);
+				RunAudioMixerVisualChecks(static_cast<OBSBasic *>(main), browser, [this] { publishState(true); }, check, [this, fixture, check] {
 				runWorkspaceChecks(check, [this, fixture, check] {
 				RunDialogWorkflowChecks(static_cast<OBSBasic *>(main), check, [this, fixture, check] {
 				RunOutputWorkflowChecks(static_cast<OBSBasic *>(main), check, [this, fixture, check] {
@@ -164,6 +173,7 @@ void runIntegrationChecks()
 					report.write(QJsonDocument(QJsonObject{{"checks", fixture->checks}}).toJson());
 				config_set_bool(obs_frontend_get_user_config(), "General", "ConfirmOnExit", false);
 				QTimer::singleShot(0, this, &QWidget::close);
+				});
 				});
 				});
 				});

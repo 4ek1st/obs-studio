@@ -9,6 +9,7 @@ let clearError;
 let scrollAreas = [];
 let nativeSize = { width: 1, height: 1 };
 let viewportScale = { x: 1, y: 1 };
+let fontRevision = 0;
 
 function applyViewportScale() {
   viewportScale = { x: innerWidth / nativeSize.width, y: innerHeight / nativeSize.height };
@@ -17,15 +18,19 @@ function applyViewportScale() {
   root.style.transform = `scale(${viewportScale.x}, ${viewportScale.y})`;
 }
 addEventListener("resize", applyViewportScale);
+document.fonts?.addEventListener("loadingdone", () => {
+  ++fontRevision;
+  for (const { element: control, data } of controls.values())
+    if (data.type === "check" || data.type === "radio") fitChoiceText(control.querySelector("span"), data);
+});
 
-function applyTheme(theme) {
+function applyTheme(theme, style = document.documentElement.style) {
   if (!theme) return;
-  const style = document.documentElement.style;
   for (const key of ["window", "windowText", "base", "text", "button", "buttonText", "mid", "highlight", "highlightedText"])
     if (/^#[0-9a-f]{6}$/i.test(theme[key] || "")) style.setProperty(`--qt-${key}`, theme[key]);
   if (typeof theme.fontFamily === "string") style.setProperty("--qt-font-family", JSON.stringify(theme.fontFamily));
   if (Number.isFinite(theme.fontSize) && theme.fontSize > 0) style.setProperty("--qt-font-size", `${theme.fontSize}px`);
-  style.colorScheme = theme.dark ? "dark" : "light";
+  if (typeof theme.dark === "boolean") style.colorScheme = theme.dark ? "dark" : "light";
 }
 
 function showError(error) {
@@ -63,6 +68,32 @@ function setIcon(parent, source) {
 function setValue(input, value) {
   if (document.activeElement !== input && input.value !== String(value ?? "")) input.value = value ?? "";
 }
+function applyDecoration(control, data) {
+  const decoration = safeIcon(data.decoration);
+  control.style.backgroundColor = decoration ? "transparent" : data.background || "transparent";
+  control.style.backgroundImage = decoration ? `url("${decoration}")` : "none";
+  control.style.backgroundSize = "100% 100%";
+  control.style.backgroundRepeat = "no-repeat";
+  // QFrame::frameWidth includes QSS padding/margins, not just the painted edge.
+  control.style.border = "none";
+}
+function fitChoiceText(caption, data) {
+  let text = caption.firstElementChild;
+  if (!text) { text = element("span", "choice-text"); caption.replaceChildren(text); }
+  if (text.textContent !== data.text) text.textContent = data.text;
+  const signature = JSON.stringify([data.text, data.font, data.textRect?.width, data.nativeTextWidth, fontRevision]);
+  if (caption.dataset.metrics === signature) return;
+  caption.dataset.metrics = signature;
+  text.style.transform = "none";
+  // Qt's hinted glyph advances can differ slightly from Chromium even with the
+  // identical bundled font. Preserve a caption that fits in the native widget;
+  // don't conceal a genuinely too-long label by shrinking it arbitrarily.
+  if (data.nativeTextWidth > 0 && data.textRect && data.nativeTextWidth <= data.textRect.width + .5) {
+    const width = text.getBoundingClientRect().width / viewportScale.x;
+    if (width > data.textRect.width && width < data.nativeTextWidth * 1.08)
+      text.style.transform = `scaleX(${data.nativeTextWidth / width})`;
+  }
+}
 function bindEditor(input, id, numeric = false) {
   input.addEventListener("input", () => {
     if (numeric && (input.value === "" || !input.validity.valid)) return;
@@ -78,6 +109,115 @@ function bindEditor(input, id, numeric = false) {
     if (typeof input.selectionStart === "number") request("dialog.selection", { id, start: input.selectionStart, end: input.selectionEnd });
     request("dialog.context", { id, ...modifiers(event) });
   });
+}
+
+// A scrollbar represents a viewport, not a slider. Its thumb must grow with the
+// visible page and its minimum must stay at the top/left, as in QScrollBar.
+function scrollbarGeometry(data, length) {
+  const range = Math.max(0, data.maximum - data.minimum);
+  const native = data.nativeStyle;
+  if (native?.grooveRect && native?.thumbRect) {
+    const thumb = data.vertical ? native.thumbRect.height : native.thumbRect.width;
+    const origin = data.vertical ? native.grooveRect.y : native.grooveRect.x;
+    const groove = data.vertical ? native.grooveRect.height : native.grooveRect.width;
+    const travel = Math.max(0, groove - thumb);
+    const ratio = range ? (data.value - data.minimum) / range : 0;
+    const offset = data.value === native.value ? (data.vertical ? native.thumbRect.y : native.thumbRect.x)
+      : origin + travel * (native.reversed ? 1 - ratio : ratio);
+    return { thumb, travel, offset, range, reversed: !!native.reversed };
+  }
+  const page = Math.max(1, data.page || 1);
+  const thumb = Math.min(length, Math.max(18, length * page / (range + page)));
+  const travel = Math.max(0, length - thumb);
+  return { thumb, travel, offset: range ? travel * (data.value - data.minimum) / range : 0, range };
+}
+function updateScrollbar(control, data, vertical) {
+  control.scrollData = { ...data, vertical };
+  data = control.scrollData;
+  control.classList.toggle("vertical", vertical);
+  control.setAttribute("aria-orientation", vertical ? "vertical" : "horizontal");
+  control.setAttribute("aria-valuemin", data.minimum);
+  control.setAttribute("aria-valuemax", data.maximum);
+  control.setAttribute("aria-valuenow", data.value);
+  control.setAttribute("aria-disabled", String(data.enabled === false));
+  const length = vertical ? control.clientHeight : control.clientWidth;
+  const geometry = scrollbarGeometry(data, length);
+  const thumb = control.firstElementChild;
+  const native = data.nativeStyle;
+  control.classList.toggle("native-style", !!safeIcon(native?.normal));
+  if (native?.thumbRect) {
+    thumb.style.cssText = "";
+    place(thumb, { ...native.thumbRect, ...(vertical ? { y: geometry.offset } : { x: geometry.offset }) });
+    for (const [name, image] of [["native", native.normal], ["hover", native.hover], ["pressed", native.pressed]])
+      control.style.setProperty(`--scrollbar-${name}`, `url("${safeIcon(image)}")`);
+  } else {
+    thumb.style.cssText = vertical
+      ? `top:${geometry.offset}px;height:${geometry.thumb}px;left:2px;right:2px`
+      : `left:${geometry.offset}px;width:${geometry.thumb}px;top:2px;bottom:2px`;
+  }
+}
+function createScrollbar(onValue, onFinish = () => {}) {
+  const control = element("div", "scrollbar");
+  control.tabIndex = 0;
+  control.setAttribute("role", "scrollbar");
+  control.setAttribute("aria-label", "Scroll");
+  control.append(element("div", "scrollbar-thumb"));
+  let drag = null;
+  const set = value => {
+    const data = control.scrollData;
+    if (!data || data.enabled === false) return;
+    const next = Math.max(data.minimum, Math.min(data.maximum, Math.round(value)));
+    if (next === data.value) return;
+    updateScrollbar(control, { ...data, value: next }, data.vertical);
+    onValue(next);
+  };
+  control.addEventListener("pointerdown", event => {
+    const data = control.scrollData;
+    if (event.button !== 0 || !data || data.enabled === false) return;
+    event.preventDefault(); control.focus({ preventScroll: true });
+    const bounds = control.getBoundingClientRect();
+    const length = data.vertical ? control.clientHeight : control.clientWidth;
+    const renderedLength = data.vertical ? bounds.height : bounds.width;
+    const geometry = scrollbarGeometry(data, length);
+    const position = ((data.vertical ? event.clientY - bounds.top : event.clientX - bounds.left) / renderedLength) * length;
+    if (event.target === control.firstElementChild && geometry.travel > 0) {
+      drag = { start: data.vertical ? event.clientY : event.clientX, value: data.value,
+        unitsPerPixel: geometry.range / geometry.travel * length / renderedLength * (geometry.reversed ? -1 : 1) };
+      control.classList.toggle("dragging", true);
+      control.setPointerCapture(event.pointerId);
+    } else {
+      const point = { x: (event.clientX - bounds.left) / bounds.width * control.clientWidth,
+        y: (event.clientY - bounds.top) / bounds.height * control.clientHeight };
+      const inside = rect => rect && point.x >= rect.x && point.x < rect.x + rect.width && point.y >= rect.y && point.y < rect.y + rect.height;
+      if (inside(data.nativeStyle?.subLineRect)) set(data.value - (data.step || 1));
+      else if (inside(data.nativeStyle?.addLineRect)) set(data.value + (data.step || 1));
+      else set(data.value + (position < geometry.offset ? -1 : 1) * (geometry.reversed ? -1 : 1) * Math.max(1, data.page || data.step || 1));
+      onFinish();
+    }
+  });
+  control.addEventListener("pointermove", event => {
+    if (!drag) return;
+    const position = control.scrollData.vertical ? event.clientY : event.clientX;
+    set(drag.value + (position - drag.start) * drag.unitsPerPixel);
+  });
+  const finish = () => { if (drag) { drag = null; control.classList.toggle("dragging", false); onFinish(); } };
+  control.addEventListener("pointerup", finish);
+  control.addEventListener("pointercancel", finish);
+  control.addEventListener("lostpointercapture", finish);
+  control.addEventListener("keydown", event => {
+    const data = control.scrollData;
+    if (!data) return;
+    let value = data.value;
+    if (event.key === "Home") value = data.minimum;
+    else if (event.key === "End") value = data.maximum;
+    else if (event.key === "PageUp") value -= data.page || 1;
+    else if (event.key === "PageDown") value += data.page || 1;
+    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") value -= data.step || 1;
+    else if (event.key === "ArrowDown" || event.key === "ArrowRight") value += data.step || 1;
+    else return;
+    event.preventDefault(); event.stopPropagation(); set(value); onFinish();
+  });
+  return control;
 }
 
 function createControl(node) {
@@ -128,7 +268,9 @@ function createControl(node) {
     const legend = element("legend");
     const caption = element(node.checkable ? "button" : "span"); legend.append(caption); control.append(legend);
     if (node.checkable) caption.addEventListener("click", () => request("dialog.click", { id }));
-  } else if (node.type === "slider" || node.type === "scroll") {
+  } else if (node.type === "scroll") {
+    control = createScrollbar(value => request("dialog.input", { id, value }), () => request("dialog.finish", { id }));
+  } else if (node.type === "slider") {
     control = element("input", `range ${node.type}`); control.type = "range";
     bindEditor(control, id, true);
     control.addEventListener("change", () => request("dialog.finish", { id }));
@@ -136,12 +278,11 @@ function createControl(node) {
     control = element("div", "items"); control.tabIndex = 0;
     control.setAttribute("role", "grid");
     control.append(element("div", "item-header"), element("div", "item-viewport"));
-    const vertical = element("input", "item-scroll vertical"); vertical.type = "range";
-    const horizontal = element("input", "item-scroll horizontal"); horizontal.type = "range";
+    const vertical = createScrollbar(value => request("dialog.scroll", { id, value, horizontal: false }));
+    const horizontal = createScrollbar(value => request("dialog.scroll", { id, value, horizontal: true }));
+    vertical.classList.add("item-scroll", "vertical");
+    horizontal.classList.add("item-scroll", "horizontal");
     control.append(vertical, horizontal);
-    for (const [bar, isHorizontal] of [[vertical, false], [horizontal, true]]) {
-      bar.addEventListener("input", () => request("dialog.scroll", { id, value: Number(bar.value), horizontal: isHorizontal }));
-    }
     control.addEventListener("wheel", event => {
       event.preventDefault();
       const data = controls.get(id)?.data;
@@ -245,14 +386,30 @@ function updateItems(control, data) {
     const bar = control.querySelector(selector);
     bar.hidden = !scroll || scroll.maximum <= scroll.minimum;
     if (!scroll) continue;
-    bar.min = scroll.minimum; bar.max = scroll.maximum; bar.value = scroll.value;
-    place(bar, vertical ? { x: data.rect.width - 15, y: data.viewport.y, width: 14, height: data.viewport.height }
-      : { x: data.viewport.x, y: data.rect.height - 15, width: data.viewport.width, height: 14 });
+    place(bar, scroll.rect || (vertical ? { x: data.rect.width - 15, y: data.viewport.y, width: 14, height: data.viewport.height }
+      : { x: data.viewport.x, y: data.rect.height - 15, width: data.viewport.width, height: 14 }));
+    updateScrollbar(bar, { ...scroll, enabled: data.enabled }, vertical);
   }
 }
 
 function updateControl(control, data) {
   place(control, data.rect);
+  if (data.palette) {
+    applyTheme(data.palette, control.style);
+    control.dataset.themed = "true";
+    const foreground = data.type === "button" ? "buttonText" : ["text", "multiline", "number", "combo", "items"].includes(data.type) ? "text" : "windowText";
+    control.style.color = `var(--qt-${foreground})`;
+  }
+  if (data.type === "panel") {
+    applyDecoration(control, data);
+  }
+  if (data.font) {
+    control.style.fontFamily = JSON.stringify(data.font.family);
+    control.style.fontSize = `${data.font.pixelSize}px`;
+    control.style.fontWeight = data.font.weight;
+    control.style.fontStyle = data.font.italic ? "italic" : "normal";
+    control.style.lineHeight = `${data.font.lineHeight}px`;
+  }
   const clip = data.clip;
   control.style.clipPath = `inset(${Math.max(0, clip.y - data.rect.y)}px ${Math.max(0, data.rect.x + data.rect.width - clip.x - clip.width)}px ${Math.max(0, data.rect.y + data.rect.height - clip.y - clip.height)}px ${Math.max(0, clip.x - data.rect.x)}px)`;
   control.title = data.tooltip || data.accessibleName || "";
@@ -274,7 +431,12 @@ function updateControl(control, data) {
     const input = control.querySelector("input");
     input.disabled = !data.enabled; input.checked = data.checked; input.indeterminate = !!data.indeterminate;
     control.classList.toggle("disabled", !data.enabled);
-    control.querySelector("span").textContent = data.text;
+    const caption = control.querySelector("span");
+    if (data.indicatorRect && data.textRect) {
+      control.classList.add("native-metrics");
+      place(input, data.indicatorRect); place(caption, data.textRect);
+    }
+    fitChoiceText(caption, data);
   } else if (["text", "multiline", "number"].includes(data.type)) {
     const input = data.type === "number" ? control.querySelector("input") : control;
     setValue(input, data.value); input.readOnly = !!data.readOnly; input.disabled = !data.enabled;
@@ -300,6 +462,7 @@ function updateControl(control, data) {
     control.classList.toggle("wrap", data.wordWrap);
     control.classList.toggle("center", !!(data.alignment & 4));
     control.classList.toggle("right", !!(data.alignment & 2));
+    applyDecoration(control, data);
     setIcon(control, data.icon);
   } else if (data.type === "tabs") {
     const signature = JSON.stringify([data.tabs, data.index, data.enabled]);
@@ -318,7 +481,9 @@ function updateControl(control, data) {
     }
   } else if (data.type === "group") {
     control.querySelector("legend > *").textContent = (data.checkable ? (data.checked ? "☑ " : "☐ ") : "") + data.text;
-  } else if (data.type === "slider" || data.type === "scroll") {
+  } else if (data.type === "scroll") {
+    updateScrollbar(control, data, data.vertical);
+  } else if (data.type === "slider") {
     control.min = data.minimum; control.max = data.maximum; control.step = data.step || 1;
     setValue(control, data.value); control.classList.toggle("vertical", data.vertical);
   } else if (data.type === "items") {
@@ -339,6 +504,7 @@ function render(state) {
   root.setAttribute("aria-label", state.title || "OBS dialog");
   const present = new Set();
   const created = new Set();
+  let layer = 0;
   for (const data of state.nodes ?? []) {
     present.add(data.id);
     let existing = controls.get(data.id);
@@ -351,6 +517,9 @@ function render(state) {
       created.add(data.id);
     }
     existing.data = data;
+    // A container may become painted after a theme/property change. Preserve Qt
+    // parent-before-child stacking without reparenting the focused HTML input.
+    existing.element.style.zIndex = ++layer;
     updateControl(existing.element, data);
   }
   for (const [id, control] of controls) {

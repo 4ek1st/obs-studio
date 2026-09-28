@@ -104,6 +104,111 @@ bool isWebDock(QDockWidget *dock) const
     return names.contains(dock->objectName());
 }
 
+QString webDockAssets, webDockProfile;
+QHash<QDockWidget *, QPointer<WebView2Widget>> webDockViews;
+
+class WebDockResizeFilter final : public QObject {
+    QPointer<WebView2Widget> view;
+public:
+    WebDockResizeFilter(QWidget *content, WebView2Widget *surface) : QObject(surface), view(surface)
+    {
+        setObjectName(QStringLiteral("obsWebView2DockResizeFilter"));
+        content->installEventFilter(this);
+    }
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        if (view && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
+            view->setGeometry(static_cast<QWidget *>(object)->rect());
+            view->raise();
+        }
+        return false;
+    }
+};
+
+void initializeWebDocks(const QString &assets, const QString &profile)
+{
+    webDockAssets = assets;
+    webDockProfile = profile;
+    for (auto *dock : main->findChildren<QDockWidget *>())
+        if (isWebDock(dock) && dock->widget())
+            dock->widget()->setProperty("_obsWebView2ExternalSurface", true);
+}
+
+void postWorkspaceMessage(const QJsonObject &message)
+{
+    browser->postMessage(message);
+    // Bridge request IDs contain a random session UUID. Only the requesting
+    // surface consumes replies; state and meter events reach every panel.
+    for (auto surface : webDockViews)
+        if (surface && (!message.contains("event") || surface->isVisible())) surface->postMessage(message);
+}
+
+void restoreWebDocks()
+{
+    // Keep original dock contents, controller objects and Qt floating state.
+    // The same docks become the normal Qt panels when the native UI is shown.
+    for (auto surface : webDockViews)
+        if (surface) surface->hide();
+}
+
+void destroyWebDocks()
+{
+    // The native dock content outlives this frontend. Release our browser hosts
+    // explicitly so reopening the frontend cannot accumulate hidden controllers.
+    const auto surfaces = webDockViews;
+    webDockViews.clear();
+    for (auto surface : surfaces)
+        if (surface) delete surface.data();
+}
+
+void showWebDock(QDockWidget *dock)
+{
+    if (!dock || !isWebDock(dock) || !dock->isFloating() || !dock->widget() ||
+        webDockAssets.isEmpty() || !surfacesBorrowed || !isVisible()) return;
+    auto surface = webDockViews.value(dock);
+    if (!surface) {
+        auto *content = dock->widget();
+        surface = new WebView2Widget(content, webDockAssets, webDockProfile);
+        surface->setObjectName(QStringLiteral("obsWebView2DockSurface"));
+        surface->setProperty("webview2Dock", dock->objectName());
+        surface->setGeometry(content->rect());
+        webDockViews.insert(dock, surface);
+        new WebDockResizeFilter(content, surface);
+        connect(surface, &WebView2Widget::ready, this, [this, surface, dock = QPointer<QDockWidget>(dock)] {
+            if (!surface || !dock) return;
+            surface->postMessage({{"version", 1}, {"event", "workspace.panel"},
+                                  {"data", QJsonObject{{"name", dock->objectName()}}}});
+            surface->postMessage({{"version", 1}, {"event", "state.changed"}, {"data", snapshot()}});
+            surface->raise();
+        });
+        connect(surface, &WebView2Widget::messageReceived, this, [this, surface](const QJsonObject &message) {
+            if (!surface) return;
+            if (message.value("command") == QStringLiteral("preview.bounds")) {
+                // A child document cannot move or hide the main GPU preview.
+                surface->postMessage({{"version", 1}, {"id", message.value("id")}, {"ok", true}, {"result", QJsonObject{}}});
+                return;
+            }
+            execute(message);
+        });
+        connect(surface, &WebView2Widget::externalDrop, this,
+                [this, surface](const QString &id, const OBSWeb::ExternalDropData &drop) {
+            if (!surface) return;
+            surface->postMessage({{"version", 1}, {"id", id}, {"ok", true}, {"result", QJsonObject{{"accepted", true}}}});
+            OBSWeb::DispatchExternalDrop(main, drop);
+        });
+        connect(surface, &WebView2Widget::failed, this, [surface, dock = QPointer<QDockWidget>(dock)](const QString &error) {
+            if (surface) { surface->setProperty("webview2Failed", true); surface->hide(); }
+            if (dock) dock->setToolTip(error);
+            blog(LOG_ERROR, "[WebView2] Floating panel failed: %s", error.toUtf8().constData());
+        });
+    }
+    surface->setGeometry(dock->widget()->rect());
+    if (surface->property("webview2Failed").toBool()) return;
+    surface->show();
+    surface->raise();
+    dock->show();
+}
+
 void showNativeDock(QDockWidget *dock)
 {
     // Plugin widgets retain their original QWidget, ownership and frontend API.
@@ -119,14 +224,30 @@ void routeDocks()
     for (auto *dock : main->findChildren<QDockWidget *>()) {
         if (routedDocks.contains(dock)) continue;
         routedDocks.insert(dock);
-        connect(dock, &QObject::destroyed, this, [this, dock] { routedDocks.remove(dock); });
+        connect(dock, &QObject::destroyed, this, [this, dock] {
+            routedDocks.remove(dock);
+            webDockViews.remove(dock);
+        });
+        connect(dock, &QDockWidget::topLevelChanged, this,
+                [this, dock = QPointer<QDockWidget>(dock)](bool floating) {
+            if (!dock || !isWebDock(dock)) return;
+            if (floating) showWebDock(dock);
+            else if (auto surface = webDockViews.value(dock)) surface->hide();
+            QTimer::singleShot(0, this, [this] { publishState(true); });
+        });
         connect(dock->toggleViewAction(), &QAction::triggered, this,
                 [this, dock = QPointer<QDockWidget>(dock)](bool visible) {
-            if (dock && visible && isVisible() && !isWebDock(dock)) showNativeDock(dock);
+            if (dock && visible && isVisible()) {
+                if (isWebDock(dock)) showWebDock(dock);
+                else showNativeDock(dock);
+            }
             publishState(true);
         });
         if (isVisible() && main->isHidden() && !dock->isHidden() && !isWebDock(dock)) showNativeDock(dock);
     }
+    if (surfacesBorrowed && isVisible())
+        for (auto *dock : main->findChildren<QDockWidget *>())
+            if (isWebDock(dock) && dock->isFloating() && !dock->isHidden()) showWebDock(dock);
 }
 
 void addWorkspaceState(QJsonObject &state)
@@ -199,8 +320,27 @@ void addWorkspaceState(QJsonObject &state)
     QJsonArray docks;
     for (auto *dock : main->findChildren<QDockWidget *>())
         docks.append(QJsonObject{{"name", dock->objectName()}, {"title", dock->windowTitle()},
-            {"visible", !dock->isHidden()}, {"action", registerAction(dock->toggleViewAction())}});
+            {"visible", !dock->isHidden()}, {"floating", dock->isFloating()},
+            {"floatable", dock->features().testFlag(QDockWidget::DockWidgetFloatable)},
+            {"action", registerAction(dock->toggleViewAction())}});
     state.insert("docks", docks);
+    QJsonObject mixerToolbar;
+    if (auto *mixer = main->findChild<AudioMixer *>()) {
+        for (auto *button : mixer->findChildren<QPushButton *>()) {
+            if (button->property("class").toStringList().join(' ').split(' ', Qt::SkipEmptyParts).contains("toggle-hidden"))
+                mixerToolbar.insert("hidden", QJsonObject{{"id", registerButton(button)},
+                    {"text", button->text()}, {"tooltip", button->toolTip()},
+                    {"enabled", button->isEnabled()}, {"checked", button->isChecked()}});
+            else if (button->menu() && button->property("class").toStringList().join(' ').split(' ', Qt::SkipEmptyParts).contains("toolbar-button"))
+                mixerToolbar.insert("optionsText", button->text());
+        }
+        for (const auto *name : {"actionMixerToolbarToggleLayout", "actionMixerToolbarAdvAudio"})
+            if (auto *action = mixer->findChild<QAction *>(QLatin1String(name))) {
+                const auto key = QByteArray(name).endsWith("ToggleLayout") ? "layoutAction" : "advancedAction";
+                mixerToolbar.insert(QLatin1String(key), registerAction(action));
+            }
+    }
+    state.insert("mixerToolbar", mixerToolbar);
     QJsonObject preferences;
     for (const auto *name : {"toggleListboxToolbars", "toggleContextBar", "toggleSourceIcons", "toggleStatusBar",
                              "actionSceneGridMode", "lockDocks"})
@@ -208,6 +348,11 @@ void addWorkspaceState(QJsonObject &state)
             preferences.insert(QLatin1String(name), action->isChecked());
     preferences.insert("verticalMixer", config_get_bool(App()->GetUserConfig(), "BasicWindow", "VerticalVolumeControl"));
     state.insert("workspace", preferences);
+    auto appearance = state.value("appearance").toObject();
+    const QFontInfo font(main->font());
+    appearance.insert("fontFamily", font.family());
+    appearance.insert("fontSize", font.pixelSize());
+    state.insert("appearance", appearance);
 }
 
 bool executeWorkspace(const QJsonObject &message)
@@ -219,6 +364,41 @@ bool executeWorkspace(const QJsonObject &message)
         reject(id, QStringLiteral("InvalidArgs"), error);
         return true;
     };
+    if (command == QStringLiteral("dock.detach") || command == QStringLiteral("dock.attach")) {
+        const auto name = args.value("name");
+        auto *dock = name.isString() ? main->findChild<QDockWidget *>(name.toString()) : nullptr;
+        auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
+        if (!dock || !isWebDock(dock)) return invalid(QStringLiteral("Unknown workspace panel."));
+        if ((lock && lock->isChecked()) || !dock->features().testFlag(QDockWidget::DockWidgetFloatable))
+            return invalid(QStringLiteral("Unlock docks before moving workspace panels."));
+        const bool floating = command == QStringLiteral("dock.detach");
+        if (floating && !dock->isFloating()) {
+            const auto bounded = [&](const char *key, double fallback, double minimum, double maximum) {
+                const auto value = args.value(QLatin1String(key));
+                return value.isDouble() && std::isfinite(value.toDouble()) ?
+                    std::clamp(value.toDouble(), minimum, maximum) : fallback;
+            };
+            const double viewport = bounded("viewportWidth", browser->width(), 100.0, 20000.0);
+            const double scale = browser->width() / viewport;
+            const int panelWidth = int(bounded("width", 320.0, 180.0, 4000.0) * scale);
+            const int panelHeight = int(bounded("height", 300.0, 180.0, 3000.0) * scale);
+            const QPoint grabOffset(int(bounded("offsetX", 36.0, 0.0, 4000.0) * scale),
+                                    int(bounded("offsetY", 16.0, 0.0, 3000.0) * scale));
+            dock->setFloating(true);
+            dock->resize(panelWidth, panelHeight);
+            dock->move(QCursor::pos() - grabOffset);
+            showWebDock(dock);
+            dock->raise();
+            dock->activateWindow();
+        } else if (!floating) {
+            if (auto surface = webDockViews.value(dock)) surface->hide();
+            dock->setFloating(false);
+            dock->show();
+        }
+        reply(id, QJsonObject{{"name", dock->objectName()}, {"floating", dock->isFloating()}});
+        publishState(true);
+        return true;
+    }
     if (command.startsWith(QStringLiteral("audio."))) {
         QString error;
         if (!audio || !audio->execute(command, args, error))
@@ -305,7 +485,7 @@ bool executeWorkspace(const QJsonObject &message)
             for (auto *checkbox : widget->findChildren<QCheckBox *>()) {
                 if ((command == "source.visibility" && checkbox->accessibleName() == QTStr("Basic.Main.Sources.Visibility")) ||
                     (command == "source.lock" && checkbox->accessibleName() == QTStr("Basic.Main.Sources.Lock")) ||
-                    (command == "source.expand" && checkbox->property("class").toStringList().contains("indicator-expand")))
+                    (command == "source.expand" && checkbox->property("class").toStringList().join(' ').split(' ', Qt::SkipEmptyParts).contains("indicator-expand")))
                     control = checkbox;
             }
             if (!control)

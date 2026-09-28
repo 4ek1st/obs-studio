@@ -29,6 +29,12 @@ foreach(resource IN ITEMS index.html app.js style.css bridge.mjs dialog.html dia
   target_add_resource(obs-studio "${CMAKE_CURRENT_SOURCE_DIR}/webview2/ui/${resource}" "${OBS_DATA_DESTINATION}/obs-studio/webview2")
 endforeach()
 
+# Qt registers these fonts from resources in its own process. WebView2 needs the
+# same files at the local origin to reproduce native control text metrics.
+foreach(font IN ITEMS OpenSans-Regular.ttf OpenSans-Bold.ttf OpenSans-Italic.ttf)
+  target_add_resource(obs-studio "${CMAKE_CURRENT_SOURCE_DIR}/forms/fonts/${font}" "${OBS_DATA_DESTINATION}/obs-studio/webview2")
+endforeach()
+
 option(ENABLE_WEBVIEW2_INTEGRATION_TESTS "Enable disposable portable OBS adapter tests" OFF)
 if(ENABLE_WEBVIEW2_INTEGRATION_TESTS)
   set_property(SOURCE webview2/OBSWebView2.cpp APPEND PROPERTY COMPILE_DEFINITIONS OBS_WEBVIEW2_INTEGRATION_TESTS)
