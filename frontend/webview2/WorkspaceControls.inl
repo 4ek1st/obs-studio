@@ -304,7 +304,7 @@ void showWebDock(QDockWidget *dock)
         });
         connect(surface, &WebView2Widget::messageReceived, this, [this, surface](const QJsonObject &message) {
             if (!surface) return;
-            if (message.value("command") == QStringLiteral("preview.bounds")) {
+            if (message.value("command") == QStringLiteral("preview.bounds") || message.value("command") == QStringLiteral("preview.layout")) {
                 // A child document cannot move or hide the main GPU preview.
                 surface->postMessage({{"version", 1}, {"id", message.value("id")}, {"ok", true}, {"result", QJsonObject{}}});
                 return;

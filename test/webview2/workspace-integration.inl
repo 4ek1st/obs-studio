@@ -36,6 +36,21 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
     check(!browser->mask().contains(menu.center()) && preview->GetDisplay() == display,
           "Closing the HTML menu restores its native video aperture without replacing the display");
 
+    QJsonObject layout{{"viewportWidth", browser->width()}, {"viewportHeight", browser->height()},
+        {"surfaces", QJsonArray{bounds, QJsonObject{{"target", "program"}, {"x", 0}, {"y", 0},
+            {"width", 0}, {"height", 0}, {"visible", false}}}}, {"overlays", QJsonArray{}}};
+    execute({{"id", "layout-batch-test"}, {"command", "preview.layout"}, {"args", layout}});
+    check(lastTestReply.value("ok").toBool() && preview->GetDisplay() == display &&
+          preview->geometry() == video.translated(browser->pos()),
+          "One layout message updates both apertures without replacing the native GPU display");
+    const auto beforeInvalid = preview->geometry();
+    auto invalidSurfaces = layout.value("surfaces").toArray();
+    auto invalidProgram = invalidSurfaces.at(1).toObject(); invalidProgram.insert("width", -1);
+    invalidSurfaces[1] = invalidProgram; layout.insert("surfaces", invalidSurfaces);
+    execute({{"id", "layout-invalid-test"}, {"command", "preview.layout"}, {"args", layout}});
+    check(!lastTestReply.value("ok").toBool() && preview->geometry() == beforeInvalid,
+          "An invalid second aperture rejects the complete resize before changing either display");
+
     auto *dock = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
     auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
     check(dock && lock, "Native Controls dock and dock lock action are available");

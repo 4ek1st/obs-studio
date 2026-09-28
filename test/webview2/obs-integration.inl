@@ -182,6 +182,15 @@ void runIntegrationChecks()
 				const auto args = message.value("args").toObject();
 				if (message.value("command") == "preview.bounds" && args.value("target") == "preview")
 					*resizedCanvas = args;
+				else if (message.value("command") == "preview.layout") {
+					for (const auto &entry : args.value("surfaces").toArray()) {
+						const auto surface = entry.toObject();
+						if (surface.value("target") != "preview") continue;
+						*resizedCanvas = surface;
+						resizedCanvas->insert("viewportWidth", args.value("viewportWidth"));
+						resizedCanvas->insert("viewportHeight", args.value("viewportHeight"));
+					}
+				}
 			});
 		main->resize(2048, 1136);
 		QTimer::singleShot(500, this, [this, fixture, check, previousPreview, resizedCanvas, resizedBoundsConnection] {

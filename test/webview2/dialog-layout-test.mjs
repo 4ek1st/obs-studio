@@ -31,6 +31,7 @@ const sandbox = {
   } }),
   setTimeout, clearTimeout,
   installExternalDrop() {},
+  createPresentation: () => async () => {},
 };
 sandbox.window = sandbox;
 vm.runInNewContext((await readFile(new URL("../../frontend/webview2/ui/dialog.js", import.meta.url), "utf8")).replace(/^import .*?;\s*/gm, ""), sandbox);

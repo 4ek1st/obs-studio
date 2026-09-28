@@ -1,3 +1,23 @@
+// NavigationCompleted only means that HTML loaded, not that OBS state, local
+// fonts and QStyle images reached the compositor. Present once after that work.
+export function createPresentation(bridge) {
+  let started = false;
+  return async function present() {
+    if (started) return;
+    started = true;
+    // Flush styles from the first state so newly used font faces are included.
+    document.documentElement.getBoundingClientRect();
+    await document.fonts?.ready;
+    await Promise.all([...document.images].map(image => image.decode?.().catch(() => {})));
+    await new Promise(requestAnimationFrame);
+    document.documentElement.dataset.presented = "true";
+    // A frame callback runs before paint. The following frame acknowledges the
+    // completed paint, including the layout changes from font loadingdone.
+    await new Promise(requestAnimationFrame);
+    await bridge.request("ui.present");
+  };
+}
+
 export function createBridge(transport, { timeoutMs = 15000 } = {}) {
   if (!transport?.postMessage || !transport?.addEventListener) {
     throw new Error("The native OBS connection is unavailable.");

@@ -345,7 +345,7 @@ class OBSWebView2 final : public QWidget {
 	{
 		const QPointer<OBSWebView2> guard(this);
 		const auto pendingCommand = message.value("command").toString();
-		if (pendingCommand != "source.rename" && pendingCommand != "state.get" && pendingCommand != "preview.bounds" &&
+		if (pendingCommand != "source.rename" && pendingCommand != "state.get" && pendingCommand != "preview.bounds" && pendingCommand != "preview.layout" &&
 		    pendingCommand != "source.hover" && pendingCommand != "menu.prepare") {
 			if (auto *tree = main->findChild<SourceTree *>(QStringLiteral("sources"))) tree->FinishWebViewEdits();
 		}
@@ -470,17 +470,25 @@ class OBSWebView2 final : public QWidget {
 				obs_frontend_open_source_properties(source);
 			else
 				obs_frontend_open_source_filters(source);
-		} else if (command == QStringLiteral("preview.bounds")) {
+		} else if (command == QStringLiteral("preview.bounds") || command == QStringLiteral("preview.layout")) {
             if (!surfacesBorrowed) { reply(id, QJsonObject{}); return; }
-            const QString target = args.value("target").toString(QStringLiteral("preview"));
-            if (target != "preview" && target != "program") {
-                reject(id, "InvalidArgs", "Unknown preview surface.");
-                return;
-            }
-            const auto bounds = OBSWeb::PreviewRect(args, browser->geometry());
-            if (!bounds) {
-                reject(id, QStringLiteral("InvalidArgs"), QStringLiteral("Invalid preview bounds or viewport."));
-                return;
+            const bool batch = command == QStringLiteral("preview.layout");
+            const auto entries = batch ? args.value("surfaces").toArray() : QJsonArray{args};
+            if (entries.size() != (batch ? 2 : 1)) { reject(id, "InvalidArgs", "Invalid preview layout."); return; }
+            struct Placement { QString target; QRect bounds; bool visible; };
+            QList<Placement> placements;
+            QSet<QString> targets;
+            for (const auto &entry : entries) {
+                auto item = entry.toObject();
+                item.insert("viewportWidth", args.value("viewportWidth"));
+                item.insert("viewportHeight", args.value("viewportHeight"));
+                const QString target = item.value("target").toString(QStringLiteral("preview"));
+                const auto bounds = OBSWeb::PreviewRect(item, browser->geometry());
+                if ((target != "preview" && target != "program") || targets.contains(target) || !bounds) {
+                    reject(id, "InvalidArgs", "Invalid preview bounds or viewport."); return;
+                }
+                targets.insert(target);
+                placements.append({target, *bounds, item.value("visible").toBool(true)});
             }
             QRegion overlays;
             if (args.contains("overlays")) {
@@ -501,21 +509,33 @@ class OBSWebView2 final : public QWidget {
             htmlOverlays = overlays;
             htmlModalOpen = args.value("modal").toBool();
             syncProgramSurface();
-            OBSQTDisplay *surface = target == "program" ? programPreview.data() : preview;
-            if (surface) {
-                surface->setGeometry(*bounds);
-                const bool enabled = target == "program" || previewRequestedEnabled();
-                surface->setVisible(enabled && args.value("visible").toBool(true) && !bounds->isEmpty());
-                surface->installEventFilter(this);
+            // Both native displays and their shared mask move in one UI turn.
+            // Never wait for another browser round trip between the two sides.
+            for (const auto &placement : placements) {
+                OBSQTDisplay *surface = placement.target == "program" ? programPreview.data() : preview;
+                if (surface) {
+                    surface->setGeometry(placement.bounds);
+                    const bool enabled = placement.target == "program" || previewRequestedEnabled();
+                    surface->setVisible(enabled && placement.visible && !placement.bounds.isEmpty());
+                    surface->installEventFilter(this);
+                }
             }
             updatePreviewMask();
-            if (target == "preview" && !reportedPreviewGeometry) {
+            if (targets.contains("preview") && !reportedPreviewGeometry) {
                 reportedPreviewGeometry = true;
+                const auto bounds = preview->geometry();
                 blog(LOG_INFO, "[WebView2] Native editor viewport %.1fx%.1f CSS, host %dx%d Qt, rect %d,%d %dx%d",
                      args.value("viewportWidth").toDouble(), args.value("viewportHeight").toDouble(),
-                     browser->width(), browser->height(), bounds->x(), bounds->y(), bounds->width(), bounds->height());
+                     browser->width(), browser->height(), bounds.x(), bounds.y(), bounds.width(), bounds.height());
             }
-            reply(id, QJsonObject{});
+            if (batch) {
+#ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
+                lastTestReply = QJsonObject{{"ok", true}, {"result", QJsonObject{}}};
+#endif
+                // Resize acknowledgements belong only to the central document;
+                // broadcasting at frame rate would wake every dock renderer.
+                browser->postMessage({{"version", 1}, {"id", id}, {"ok", true}, {"result", QJsonObject{}}});
+            } else reply(id, QJsonObject{});
 		} else if (command == QStringLiteral("window.original")) {
 			timer->stop();
 			meterTimer->stop();

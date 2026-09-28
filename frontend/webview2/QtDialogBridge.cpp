@@ -22,6 +22,9 @@
 #include <QFocusEvent>
 #include <QFontDialog>
 #include <QFontInfo>
+#include <QLibrary>
+#include <Windows.h>
+#include <dwmapi.h>
 #include <QFontMetricsF>
 #include <QFrame>
 #include <QGroupBox>
@@ -875,38 +878,91 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 } // namespace OBSWeb
 
 namespace {
+bool CloakOpeningWindow(QWidget *window, bool hidden)
+{
+	using SetAttribute = HRESULT(WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
+	static auto setAttribute = reinterpret_cast<SetAttribute>(QLibrary::resolve(QStringLiteral("dwmapi"), "DwmSetWindowAttribute"));
+	const BOOL cloak = hidden;
+	const auto id = hidden ? window->winId() : window->internalWinId();
+	return id && setAttribute && SUCCEEDED(setAttribute(reinterpret_cast<HWND>(id), DWMWA_CLOAK, &cloak, sizeof(cloak)));
+}
+
+class DialogOpening : public QObject {
+	QPointer<QDialog> dialog;
+	qreal opacity;
+	QTimer deadline;
+	bool pending = true;
+	bool cloaked = false;
+
+public:
+	DialogOpening(QDialog *target, QObject *owner, std::function<void()> fallback)
+		: QObject(owner), dialog(target), opacity(target->windowOpacity())
+	{
+		// Show events arrive before Qt maps the top-level window. Keep its normal
+		// visibility/modality/layout lifecycle and DWM composition running. Opacity
+		// changes recreate the layered-window backing store and briefly expose Qt
+		// controls; DWM cloaking reveals the already-composed WebView in one step.
+		cloaked = CloakOpeningWindow(target, true);
+		if (!cloaked) target->setWindowOpacity(0);
+		target->setProperty("webview2Opening", true);
+		deadline.setSingleShot(true);
+		connect(&deadline, &QTimer::timeout, this, [this, fallback = std::move(fallback)] {
+			fallback();
+			finish();
+		});
+		deadline.start(3000);
+	}
+	~DialogOpening() override { finish(); }
+	void finish()
+	{
+		if (!pending) return;
+		pending = false;
+		deadline.stop();
+		if (dialog) {
+			dialog->setProperty("webview2Opening", false);
+			if (cloaked) CloakOpeningWindow(dialog, false);
+			else dialog->setWindowOpacity(opacity);
+		}
+	}
+};
+
 class DialogSurface : public QObject {
 	QPointer<QWidget> dialog;
 	QPointer<WebView2Widget> web;
+	QPointer<DialogOpening> opening;
 	OBSWeb::QtDialogBridge bridge;
 	QTimer timer;
 	QByteArray lastSnapshot;
 	bool ready = false;
 	bool failed = false;
+	bool geometryPending = false;
 
 public:
-	DialogSurface(QWidget *target, const QString &assets, const QString &profile, QObject *owner)
-		: QObject(owner), dialog(target), bridge(target, this)
+	DialogSurface(QWidget *target, const QString &assets, const QString &profile, QObject *owner, DialogOpening *pendingOpening)
+		: QObject(owner), dialog(target), opening(pendingOpening), bridge(target, this)
 	{
+		target->setProperty("webview2NativeFallback", false);
 		target->installEventFilter(this);
 		web = new WebView2Widget(target, assets, profile, QStringLiteral("dialog.html"));
 		web->setProperty(surfaceProperty, true);
 		web->setObjectName(QStringLiteral("obsWebView2DialogSurface"));
 		web->setGeometry(target->rect());
-		// Keep the native dialog operable until the document has actually loaded.
+		// The controller must render to produce its first-frame acknowledgement.
+		// Top-level dialogs stay cloaked until that acknowledgement arrives.
 		web->hide();
 		connect(target, &QObject::destroyed, this, [this] { dialog = nullptr; web = nullptr; deleteLater(); });
 		connect(web, &WebView2Widget::ready, this, [this] {
-			if (!dialog || !web) return;
+			if (!dialog || !web || failed) return;
 			ready = true; failed = false;
 			web->setGeometry(dialog->rect()); web->show(); web->raise();
 			publish(true);
 			web->setFocus(Qt::OtherFocusReason);
 		});
+		connect(web, &WebView2Widget::presented, this, [this] {
+			if (!failed && opening) opening->finish();
+		});
 		connect(web, &WebView2Widget::failed, this, [this](const QString &) {
-			failed = true; ready = false;
-			if (web) web->hide();
-			if (dialog) dialog->setProperty("webview2NativeFallback", true);
+			fallback();
 		});
 		connect(web, &WebView2Widget::messageReceived, this, [this](const QJsonObject &request) {
 			const QPointer<DialogSurface> guard(this);
@@ -939,6 +995,14 @@ public:
 	}
 
 	~DialogSurface() override { if (web) delete web.data(); }
+
+	void fallback()
+	{
+		failed = true; ready = false;
+		if (web) web->hide();
+		if (dialog) dialog->setProperty("webview2NativeFallback", true);
+		if (opening) opening->finish();
+	}
 
 	void retire()
 	{
@@ -980,6 +1044,7 @@ public:
 		if (hasNative && region.isEmpty()) {
 			// Qt treats an empty mask as no mask, which would cover the native control.
 			web->hide();
+			if (opening) opening->finish();
 		} else {
 			if (hasNative) web->setMask(region); else web->clearMask();
 			if (!web->isVisible()) { web->show(); web->raise(); }
@@ -990,7 +1055,15 @@ public:
 	bool eventFilter(QObject *watched, QEvent *event) override
 	{
 		if (watched == dialog && web) {
-			if (event->type() == QEvent::Resize) { web->setGeometry(dialog->rect()); lastSnapshot.clear(); }
+			if (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest) {
+				web->setGeometry(dialog->rect());
+				if (!geometryPending) {
+					geometryPending = true;
+					// Publish after Qt finishes this layout, rather than waiting for
+					// the 120ms state poll while the browser stretches an old frame.
+					QTimer::singleShot(0, this, [this] { geometryPending = false; publish(false); });
+				}
+			}
 			if (event->type() == QEvent::Show && ready && !failed) { web->show(); web->raise(); publish(true); }
 		}
 		return QObject::eventFilter(watched, event);
@@ -1001,6 +1074,7 @@ class DialogInstaller : public QObject {
 	QString assets;
 	QString profile;
 	QHash<QWidget *, QPointer<DialogSurface>> surfaces;
+	QHash<QWidget *, QPointer<DialogOpening>> openings;
 	QHash<QDockWidget *, QPointer<QWidget>> dockContents;
 	QSet<QDockWidget *> queuedDocks;
 
@@ -1011,7 +1085,7 @@ class DialogInstaller : public QObject {
 			return;
 		}
 		if (!content || !content->isVisible() || content->property(surfaceProperty).toBool() || surfaces.value(content)) return;
-		auto *surface = new DialogSurface(content, assets, profile, this);
+		auto *surface = new DialogSurface(content, assets, profile, this, openings.value(content));
 		surfaces.insert(content, surface);
 		connect(content, &QObject::destroyed, this, [this, content] { surfaces.remove(content); });
 	}
@@ -1072,12 +1146,14 @@ public:
 
 	bool eventFilter(QObject *object, QEvent *event) override
 	{
-		if (event->type() == QEvent::Hide) {
+		if (event->type() == QEvent::Hide && !event->spontaneous()) {
 			// QDialog::done/reject can destroy its platform window while retaining
 			// the QWidget and model (Remux, Scripts, browser docks). That closes the
 			// child WebView controller. Recreate only the renderer on the next Show.
-			if (auto *dialog = qobject_cast<QDialog *>(object); dialog && surfaces.contains(dialog))
+			if (auto *dialog = qobject_cast<QDialog *>(object)) {
 				retireSurface(dialog);
+				if (auto opening = openings.take(dialog)) { opening->finish(); opening->deleteLater(); }
+			}
 		}
 		if (event->type() == QEvent::DynamicPropertyChange &&
 		    static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == externalSurfaceProperty) {
@@ -1098,9 +1174,23 @@ public:
 		if (event->type() != QEvent::Show) return false;
 		auto *dialog = qobject_cast<QDialog *>(object);
 		if (!dialog || dialog->property(surfaceProperty).toBool() || qobject_cast<QFileDialog *>(dialog) ||
-		    qobject_cast<QColorDialog *>(dialog) || qobject_cast<QFontDialog *>(dialog) || surfaces.value(dialog)) return false;
+		    qobject_cast<QColorDialog *>(dialog) || qobject_cast<QFontDialog *>(dialog) || surfaces.value(dialog) ||
+		    dialog->property(externalSurfaceProperty).toBool() || openings.value(dialog)) return false;
 		// Queue outside QWidget::show and outside any WebView2 COM callback.
 		const QPointer<QDialog> guard(dialog);
+		// Spontaneous Show also occurs on restore/unminimize. Do not restart an
+		// existing window's presentation or interfere with that native transition.
+		if (!event->spontaneous()) {
+			auto *opening = new DialogOpening(dialog, this, [this, guard] {
+				if (!guard) return;
+				if (auto surface = surfaces.value(guard)) surface->fallback();
+				else guard->setProperty("webview2NativeFallback", true);
+			});
+			openings.insert(dialog, opening);
+			connect(dialog, &QObject::destroyed, this, [this, dialog] {
+				if (auto opening = openings.take(dialog)) opening->deleteLater();
+			});
+		}
 		QTimer::singleShot(0, this, [this, guard] {
 			if (guard) ensureSurface(guard);
 		});

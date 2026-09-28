@@ -30,6 +30,7 @@ const sandbox = {
   createBridge: () => ({subscribe: (_name, callback) => { render = callback; }, request: (command, args) => {
     requests.push({command, args}); return Promise.resolve({}); }}),
   installExternalDrop() {},
+  createPresentation: () => async () => {},
 };
 vm.runInNewContext((await readFile(new URL("../../frontend/webview2/ui/dialog.js", import.meta.url), "utf8")).replace(/^import .*?;\s*/gm, ""), sandbox);
 const rect = {x: 0, y: 0, width: 220, height: 28};

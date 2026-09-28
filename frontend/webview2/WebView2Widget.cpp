@@ -29,7 +29,11 @@ struct WebView2Widget::Impl {
 	QString document;
 	bool comInitialized = false;
 	bool loaded = false;
+	bool presented = false;
+	bool presentationPending = false;
 	bool boundsUpdatePending = false;
+	RECT lastBounds{};
+	bool hasBounds = false;
 	ComPtr<ICoreWebView2Environment> environment;
 	ComPtr<ICoreWebView2Controller> controller;
 	ComPtr<ICoreWebView2> webview;
@@ -61,6 +65,11 @@ WebView2Widget::WebView2Widget(QWidget *parent, QString assetsPath, QString prof
 	impl->profile = QDir(profilePath).absolutePath();
 	impl->document = std::move(document);
 	impl->trace("construct");
+	// Set before environment/controller creation: setting the controller property
+	// alone still allows a white startup frame in WebView2.
+	if (!qEnvironmentVariableIsSet("WEBVIEW2_DEFAULT_BACKGROUND_COLOR"))
+		qputenv("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", palette().color(QPalette::Window).name(QColor::HexArgb).mid(1).toLatin1());
+	setAutoFillBackground(true);
 	setAttribute(Qt::WA_DontCreateNativeAncestors);
 	// WebView needs one HWND. Without this scoped policy Qt permanently marks
 	// its parent nativeChildrenForced, turning later Settings/hotkey controls
@@ -139,6 +148,11 @@ void WebView2Widget::initialize()
 							auto &state = *guard->impl;
 							state.trace("controller-ready");
 							state.controller = controller;
+							ComPtr<ICoreWebView2Controller2> background;
+							if (SUCCEEDED(state.controller.As(&background))) {
+								const QColor color = guard->palette().color(QPalette::Window);
+								background->put_DefaultBackgroundColor({255, BYTE(color.red()), BYTE(color.green()), BYTE(color.blue())});
+							}
 							if (FAILED(controller->get_CoreWebView2(&state.webview))) {
 								guard->reportFailure(QStringLiteral("Cannot access WebView2"), E_FAIL);
 								return S_OK;
@@ -237,8 +251,13 @@ void WebView2Widget::initialize()
 														  {QStringLiteral("command"), request->command},
 														  {QStringLiteral("args"), request->args}};
 											QTimer::singleShot(0, guard.data(), [guard, message] {
-												if (guard && guard->impl->loaded)
-													emit guard->messageReceived(message);
+												if (!guard || !guard->impl->loaded) return;
+												if (message.value("command") == QStringLiteral("ui.present")) {
+													guard->postMessage({{"version", 1}, {"id", message.value("id")}, {"ok", true}, {"result", QJsonObject{}}});
+													guard->presentFrame();
+													return;
+												}
+												emit guard->messageReceived(message);
 											});
 										}
 										return S_OK;
@@ -303,6 +322,36 @@ void WebView2Widget::postMessage(const QJsonObject &message)
 	const HRESULT result = impl->webview->PostWebMessageAsJson(json.c_str());
 	if (FAILED(result))
 		reportFailure(QStringLiteral("Cannot deliver WebView2 message"), result);
+}
+
+void WebView2Widget::presentFrame()
+{
+	if (impl->presented || impl->presentationPending || !impl->webview) return;
+	impl->presentationPending = true;
+	// requestAnimationFrame confirms document paint, not submission of a native
+	// compositor frame. CapturePreview completes after that submission, including
+	// for a cloaked top-level window. Discard the one-time image in memory.
+	ComPtr<IStream> stream;
+	QPointer<WebView2Widget> guard(this);
+	auto finish = [guard](HRESULT result) {
+		if (!guard) return;
+		QTimer::singleShot(0, guard, [guard, result] {
+			if (!guard) return;
+			guard->impl->presentationPending = false;
+			if (FAILED(result)) { guard->reportFailure(QStringLiteral("Cannot present WebView2 frame"), result); return; }
+			guard->impl->presented = true;
+			guard->setProperty("webview2Presented", true);
+			guard->impl->trace("presented");
+			emit guard->presented();
+		});
+	};
+	const HRESULT created = CreateStreamOnHGlobal(nullptr, TRUE, &stream);
+	if (FAILED(created)) { finish(created); return; }
+	const HRESULT started = impl->webview->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream.Get(),
+		Callback<ICoreWebView2CapturePreviewCompletedHandler>([stream, finish](HRESULT result) -> HRESULT {
+			finish(result); return S_OK;
+		}).Get());
+	if (FAILED(started)) finish(started);
 }
 
 void WebView2Widget::capturePreview(QString path, std::function<void(bool)> done)
@@ -402,7 +451,15 @@ void WebView2Widget::updateBounds()
 	RECT bounds{};
 	if (!GetClientRect(reinterpret_cast<HWND>(winId()), &bounds))
 		return;
-	impl->controller->put_Bounds(bounds);
+	// Qt sends resize, layout and a deferred HWND correction for the same size.
+	// Repeating put_Bounds forces redundant Chromium layout/compositor work.
+	if (!impl->hasBounds || bounds.left != impl->lastBounds.left || bounds.top != impl->lastBounds.top ||
+	    bounds.right != impl->lastBounds.right || bounds.bottom != impl->lastBounds.bottom) {
+		if (SUCCEEDED(impl->controller->put_Bounds(bounds))) {
+			impl->lastBounds = bounds;
+			impl->hasBounds = true;
+		}
+	}
 	impl->controller->NotifyParentWindowPositionChanged();
 }
 

@@ -86,6 +86,26 @@ The helper does not simulate an Explorer drag through WebView COM. That file
 transport is covered separately by origin/parser/client tests. A successful
 dialog tour is not a claim that every operation in that dialog was tested.
 
+## Opening presentation regression
+
+`dialog-presentation-test` samples the composed desktop every 16 ms during three
+open/close cycles of the same dialog. It checks for white/empty frames, compares
+the first and final heading pixels to catch a Qt-to-WebView appearance switch,
+and verifies retained input and one presented renderer. It uses a temporary
+WebView profile. This is an interactive desktop test, not a headless CTest gate;
+leave its owned window unobstructed. Native OS fade transitions are disabled for
+the fixture only so they are not misclassified as application flicker.
+
+Run the executable with the UI asset directory (including the three Open Sans
+fonts) and a new evidence directory. Set `PATH` to include the Qt `bin` directory
+and `QT_QPA_PLATFORM_PLUGIN_PATH` to its `plugins/platforms` directory, as CTest
+does for the other targets. Append `--expect-fallback` and supply a `dialog.html`
+which never sends `ui.present` to verify the bounded native fallback.
+
+Desktop capture coordinates are relative to the selected `QScreen`; HWND hit
+testing uses physical global coordinates. Mixing them records another part of
+the desktop on secondary monitors and invalidates the result.
+
 ## Explicit remaining coverage limits
 
 - Profile and collection native file pickers retain original Qt/OS controllers;

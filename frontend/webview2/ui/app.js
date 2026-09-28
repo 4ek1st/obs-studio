@@ -1,12 +1,14 @@
-import { createBridge } from "./bridge.mjs";
+import { createBridge, createPresentation } from "./bridge.mjs";
 import { installExternalDrop } from "./external-drop.mjs";
 
 const $ = id => document.getElementById(id);
 const clean = text => String(text ?? "").replace(/&&/g, "\u0000").replace(/&/g, "").replace(/\u0000/g, "&");
 const keyOf = row => [row.owner ?? "", row.id, row.uuid].join("/");
 let bridge, state, renameTarget, dragged;
+let present;
 let menuSignature = "", boundsFrame = 0, connected = false;
-const boundsSignatures = new Map(), audioElements = new Map(), actionsByName = new Map();
+let boundsPending = false, boundsDirty = false, boundsSignature = "";
+const audioElements = new Map(), actionsByName = new Map();
 const defaultPanelOrder = ["scenesDock","sourcesDock","mixerDock","transitionsDock","controlsDock"];
 let panelMode = "";
 const nativeCommands = new Set(["action.invoke", "control.click", "native.command", "source.visibility", "source.lock", "source.expand", "source.rename", "source.move", "source.selectAll", "scene.rename", "scene.move", "scene.activate"]);
@@ -415,33 +417,49 @@ function renderTransitions(next) {
     $("quick-transitions").dataset.signature=quickSignature;
     const nodes=quick.map(c=>{
       const row=document.createElement("div");row.className="quick-row";
-      row.append(button(c.text,()=>request("control.click",{id:c.id}),c.enabled),iconButton("dots","Настроить "+clean(c.text),()=>request("native.command",{id:"studio.quick.options",button:c.id}),c.enabled));
+      const action=button(c.text,()=>request("control.click",{id:c.id}),c.enabled);action.title=clean(c.text);
+      row.append(action,iconButton("dots","Настроить "+clean(c.text),()=>request("native.command",{id:"studio.quick.options",button:c.id}),c.enabled));
       return row;
     });
     if(next.addQuickTransition)nodes.push(button("+ Быстрый переход",()=>request("control.click",{id:next.addQuickTransition}),next.addQuickTransitionEnabled!==false));
     $("quick-transitions").replaceChildren(...nodes);
   }
   const tbar=$("tbar"),geometry=next.tbarGeometry;
-  if(geometry){
-    tbar.min=geometry.minimum;tbar.max=geometry.maximum;
-    tbar.style.height=geometry.height+"px";
-    const width=tbar.getBoundingClientRect().width;
-    tbar.style.setProperty("--tbar-thumb-width",(geometry.thumbWidth*width)+"px");
-    tbar.style.setProperty("--tbar-thumb-height",(geometry.thumbHeight*geometry.height)+"px");
-    tbar.dir=geometry.first>geometry.last?"rtl":"ltr";
-    tbar.style.paddingLeft=Math.max(0,(Math.min(geometry.first,geometry.last)-geometry.thumbWidth/2)*width)+"px";
-    tbar.style.paddingRight=Math.max(0,(1-Math.max(geometry.first,geometry.last)-geometry.thumbWidth/2)*width)+"px";
-  }
+  if(geometry)applyTBarGeometry(tbar,geometry);
   // The original TBarReleased can snap to zero while the Web input still has
   // focus. Every gesture is native, so focus must not suppress native updates.
   tbar.value=next.tbar??0;
+}
+function applyTBarGeometry(slider,geometry){
+  slider._nativeGeometry=geometry;
+  slider.min=geometry.minimum;slider.max=geometry.maximum;
+  const scale=(geometry.devicePixelRatio||1)/(window.devicePixelRatio||1);
+  const height=(geometry.preferredHeight||geometry.height)*scale;
+  const nativeWidth=geometry.width||slider.getBoundingClientRect().width;
+  const thumbWidth=(geometry.thumbWidthPixels||geometry.thumbWidth*nativeWidth)*scale;
+  const thumbHeight=Math.min(height,(geometry.thumbHeightPixels||geometry.thumbHeight*geometry.height)*scale);
+  const left=Math.max(0,(Math.min(geometry.first,geometry.last)-geometry.thumbWidth/2)*nativeWidth*scale);
+  const right=Math.max(0,(1-Math.max(geometry.first,geometry.last)-geometry.thumbWidth/2)*nativeWidth*scale);
+  slider._visualGeometry={thumbWidth,height,scale,left,right};
+  slider.style.height=height+"px";
+  slider.style.setProperty("--tbar-thumb-width",thumbWidth+"px");
+  slider.style.setProperty("--tbar-thumb-height",thumbHeight+"px");
+  slider.style.paddingLeft=left+"px";slider.style.paddingRight=right+"px";
+  slider.dir=geometry.first>geometry.last?"rtl":"ltr";
 }
 function installNativeTBarInput(slider,dispatch) {
   const keys=new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","PageUp","PageDown","Home","End"]);
   let pointer=null,button=0,last={x:0,y:0.5};
   const point=event=>{
     const rect=slider.getBoundingClientRect();
-    return {x:Math.max(-1,Math.min(2,(event.clientX-rect.left)/Math.max(1,rect.width))),y:Math.max(-1,Math.min(2,(event.clientY-rect.top)/Math.max(1,rect.height)))};
+    let x=(event.clientX-rect.left)/Math.max(1,rect.width),y=(event.clientY-rect.top)/Math.max(1,rect.height);
+    const native=slider._nativeGeometry,visual=slider._visualGeometry;
+    if(native&&visual){
+      const first=(visual.left+visual.thumbWidth/2)/rect.width,last=1-(visual.right+visual.thumbWidth/2)/rect.width;
+      if(last>first)x=Math.min(native.first,native.last)+(x-first)/(last-first)*Math.abs(native.last-native.first);
+      y=.5+(y-.5)*rect.height/(Math.max(1,native.height)*visual.scale);
+    }
+    return {x:Math.max(-1,Math.min(2,x)),y:Math.max(-1,Math.min(2,y))};
   };
   const send=(kind,event)=>dispatch("studio.tbar.input",{kind,...last,button,control:!!event.ctrlKey,shift:!!event.shiftKey});
   slider.addEventListener("pointerdown",event=>{
@@ -548,6 +566,7 @@ function render(next) {
   if(rendersPanel("controlsDock"))renderControls(next.controls);
   renderWorkspace(next);
   scheduleBounds();
+  present?.().catch(showError);
 }
 function rendersPanel(name){return panelMode?panelMode===name:!state?.workspace?.nativeDocking;}
 function renderWorkspace(next) {
@@ -575,21 +594,29 @@ function renderSceneGrid(next) {
 }
 function scheduleBounds() {
   if(panelMode)return;
+  boundsDirty=true;
+  if(boundsPending)return;
   if(boundsFrame)return;
   boundsFrame=requestAnimationFrame(async()=>{
     boundsFrame=0;if(!connected)return;
+    boundsDirty=false;
     const overlayElements=[...document.querySelectorAll(".menu[open] > .menu-popover, .panel-drag-ghost"),...(!$("context-menu").hidden?[$("context-menu")]:[]),...($("rename-dialog").open?[$("rename-dialog")]:[])];
     const overlays=overlayElements.map(element=>{
       const rect=element.getBoundingClientRect(),x=Math.max(0,rect.left),y=Math.max(0,rect.top);
       return {x,y,width:Math.max(0,Math.min(innerWidth,rect.right)-x),height:Math.max(0,Math.min(innerHeight,rect.bottom)-y)};
     }).filter(rect=>rect.width&&rect.height);
+    const surfaces=[];
     for(const target of ["preview","program"]){
       const area=$(target),bounds=area.getBoundingClientRect(),visible=target==="preview"?state.previewControls?.enabled!==false:state.studioMode;
-      const args={target,x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,viewportWidth:innerWidth,viewportHeight:innerHeight,visible,overlays,modal:$("rename-dialog").open};
+      const args={target,x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,visible};
       if(!bounds.width||!bounds.height){args.x=args.y=args.width=args.height=0;}
-      const signature=JSON.stringify(args);if(boundsSignatures.get(target)===signature)continue;
-      const result=await request("preview.bounds",args);if(result!==undefined)boundsSignatures.set(target,signature);
+      surfaces.push(args);
     }
+    const args={surfaces,viewportWidth:innerWidth,viewportHeight:innerHeight,overlays,modal:$("rename-dialog").open};
+    const signature=JSON.stringify(args);if(boundsSignature===signature)return;
+    boundsPending=true;
+    try{if(await request("preview.layout",args)!==undefined)boundsSignature=signature;}
+    finally{boundsPending=false;if(boundsDirty)scheduleBounds();}
   });
 }
 $("original").addEventListener("click",()=>request("window.original"));
@@ -667,8 +694,9 @@ document.addEventListener("toggle",scheduleBounds,true);
 new ResizeObserver(scheduleBounds).observe($("preview"));new ResizeObserver(scheduleBounds).observe($("program"));
 new ResizeObserver(()=>{if(state)renderSceneGrid(state);}).observe($("scenes"));
 window.addEventListener("resize",scheduleBounds);window.addEventListener("pagehide",()=>bridge?.dispose());
-try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",updateLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignatures.clear();scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel","native-dock-panel");if(state)renderWorkspace(state);});}
+try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",updateLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignature="";scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel","native-dock-panel");if(state)renderWorkspace(state);});}
 catch(error){showError(error);$("connection").textContent="Нет соединения с OBS";}
+if(bridge)present=createPresentation(bridge);
 if(bridge)bridge.subscribe("workspace.rename",data=>{if((data?.kind==="source"&&panelMode==="sourcesDock")||(data?.kind==="scene"&&panelMode==="scenesDock")){const rows=data.kind==="source"?state?.sources:state?.scenes;const row=rows?.find(row=>data.kind==="source"?keyOf(row)===keyOf(data.row):row.uuid===data.row?.uuid);if(row)rename(data.kind,row);}});
 if(bridge)bridge.subscribe("workspace.rename.finished",finishNativeRename);
 if(bridge)installExternalDrop(document,{onError:showError});

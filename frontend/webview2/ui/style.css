@@ -62,3 +62,17 @@ header{background:var(--bg)}.panel h2,#context-bar{background:var(--raised)}.men
 
 /* Native SourceTreeItem paints its translucent color over the list selection. */
 #sources>.row{background-image:linear-gradient(var(--source-color,transparent),var(--source-color,transparent))}
+
+html:not([data-presented]) body{visibility:hidden}
+
+/* Match Qt's content-sized studio column; never let its grid overflow a fixed
+   145px track and cover the native program display. */
+#studio-controls{width:max-content;min-width:145px;max-width:min(36vw,340px);flex:0 0 auto;gap:8px;overflow-y:auto;padding:12px 0;justify-content:safe center}
+#studio-controls>*{flex-shrink:0;min-width:0}
+#studio-controls button{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+#quick-transitions{grid-template-columns:minmax(0,1fr)}
+#studio-controls #tbar{flex:none}
+#context-bar{background:color-mix(in srgb,var(--bg) 94%,var(--text) 6%);border-top:1px solid color-mix(in srgb,var(--bg) 84%,var(--text) 16%)}
+#context-bar button{background:transparent}
+#context-bar button:hover:not(:disabled){background:var(--raised)}
+#context-bar select{background:var(--panel)}

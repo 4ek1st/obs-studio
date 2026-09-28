@@ -374,9 +374,11 @@ class FrontendParityAudit final : public QObject {
                 return;
             }
         }
-        if (ownsPixels)
-            composedSaved = current->screen()->grabWindow(0, origin.x(), origin.y(), current->width(), current->height())
+        if (ownsPixels) {
+            const auto screenOrigin = origin - current->screen()->geometry().topLeft();
+            composedSaved = current->screen()->grabWindow(0, screenOrigin.x(), screenOrigin.y(), current->width(), current->height())
                 .save(QDir(directory).filePath(key + "-composed.png"));
+        }
         if (ownsPixels && !composedSaved) composedFailure = "Owned screen capture could not be saved";
         OBSWeb::QtDialogBridge bridge(current);
         const auto snapshot = bridge.snapshot();
@@ -426,7 +428,8 @@ public:
             if (current) {
                 if (firstDetectedMs < 0) firstDetectedMs = wait.elapsed();
                 auto *surface = current->findChild<WebView2Widget *>("obsWebView2DialogSurface", Qt::FindDirectChildrenOnly);
-                if (!web || (surface && surface->isVisible())) {
+                if (!web || (surface && surface->isVisible() && surface->property("webview2Presented").toBool() &&
+                             !current->property("webview2Opening").toBool())) {
                     if (web) surfaceReadyMs = wait.elapsed();
                     poll.stop(); pending = true;
                     // Measured milestones above exclude this visual stabilization delay.

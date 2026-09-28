@@ -40,7 +40,7 @@ int main(int argc, char **argv)
 				std::cerr << "HOST FAILURE: " << error.toStdString() << std::endl;
 			});
 		}
-		if (surface && surface->isVisible()) {
+		if (surface && surface->isVisible() && surface->property("webview2Presented").toBool() && dialog.windowOpacity() > 0) {
 			if (stage == 0) {
 				std::cout << "PASS: first modeless surface ready" << std::endl;
 				stage = 1; dialog.reject();

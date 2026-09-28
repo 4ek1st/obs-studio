@@ -21,7 +21,10 @@ inline QJsonObject SliderGeometry(SliderIgnoreScroll *slider)
 	option.sliderPosition = slider->maximum();
 	const auto last = slider->style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, slider);
 	return {{"first", (first.x() + first.width() / 2.0) / width}, {"last", (last.x() + last.width() / 2.0) / width},
-		{"thumbWidth", first.width() / width}, {"thumbHeight", first.height() / height}, {"height", height},
+		{"thumbWidth", first.width() / width}, {"thumbHeight", first.height() / height}, {"height", height}, {"width", width},
+		{"thumbWidthPixels", first.width()}, {"thumbHeightPixels", first.height()},
+		{"preferredHeight", std::max(slider->minimumSizeHint().height(), slider->sizeHint().height())},
+		{"devicePixelRatio", slider->devicePixelRatioF()},
 		{"minimum", slider->minimum()}, {"maximum", slider->maximum()}};
 }
 

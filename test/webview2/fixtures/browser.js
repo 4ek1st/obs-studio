@@ -32,6 +32,13 @@
   state.transitions=[{uuid:"fade",name:"Затухание"},{uuid:"cut",name:"Обрезка"}];state.currentTransition="fade";state.transitionDuration=300;
   state.transitionControls=[{id:"transitionAdd",text:"Добавить переход",enabled:true},{id:"transitionRemove",text:"Удалить переход",enabled:false},{id:"transitionProps",text:"Свойства перехода",enabled:false}];
   state.quickTransitions=[{id:"quick-cut",text:"Обрезка",enabled:true},{id:"quick-fade",text:"Затухание (300 мс)",enabled:true}];state.nativeEditor=true;state.cpu=1.6;
+  if(new URLSearchParams(location.search).has("studio")){
+    state.studioMode=true;
+    state.quickTransitions.push({id:"quick-black",text:"Затухание в чёрный (300 мс)",enabled:true});
+    state.addQuickTransition="studio-add";
+    state.tbarGeometry={width:1000,height:500,preferredHeight:40,thumbWidth:.024,thumbHeight:.08,
+      thumbWidthPixels:24,thumbHeightPixels:40,first:.012,last:.988,minimum:0,maximum:1023,devicePixelRatio:1};
+  }
   function send(data) { for (const callback of events) callback({ data: structuredClone(data) }); }
   function syncHistoryActions() { undoAction.enabled=!!undoAudio; redoAction.enabled=!!redoAudio; }
   function publish() { syncHistoryActions(); if(document.body)document.body.dataset.previewEnabled=String(state.previewControls.enabled); send({ version: 1, event: "state.changed", data: state }); }
@@ -40,7 +47,7 @@
     addEventListener(type, callback) { events.add(callback); },
     removeEventListener(type, callback) { events.delete(callback); },
     postMessage(message) {
-      if(document.body&&message.command!=="preview.bounds"){
+      if(document.body&&!["preview.bounds","preview.layout","ui.present"].includes(message.command)){
         document.body.dataset.lastCommand=message.command;
         document.body.dataset.lastArgs=JSON.stringify(message.args??{});
       }

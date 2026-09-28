@@ -17,6 +17,7 @@ public:
 
 signals:
 	void ready();
+	void presented();
 	void messageReceived(QJsonObject message);
 	void failed(QString message);
 	void externalDrop(QString requestId, OBSWeb::ExternalDropData drop);
@@ -32,6 +33,7 @@ private:
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 	void initialize();
+	void presentFrame();
 	void updateBounds();
 	void queueBoundsUpdate();
 	void reportFailure(const QString &stage, long result);

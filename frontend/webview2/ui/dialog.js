@@ -1,10 +1,11 @@
-import { createBridge } from "./bridge.mjs";
+import { createBridge, createPresentation } from "./bridge.mjs";
 import { installExternalDrop } from "./external-drop.mjs";
 
 const root = document.querySelector("#dialog");
 const errorBox = document.querySelector("#error");
 const controls = new Map();
 let connection;
+let presentFrame;
 let firstState = true;
 let clearError;
 let scrollAreas = [];
@@ -611,6 +612,7 @@ function render(state) {
       else focus.select();
     }
   }
+  presentFrame?.().catch(showError);
 }
 
 document.addEventListener("keydown", event => {
@@ -643,6 +645,7 @@ document.addEventListener("wheel", event => {
 
 try {
   connection = createBridge(globalThis.chrome?.webview);
+  presentFrame = createPresentation(connection);
   connection.subscribe("dialog.state", render);
   installExternalDrop(document, { onError: showError, enabled: () => acceptingDrops });
   request("dialog.state");
