@@ -10,6 +10,8 @@ target_sources(
   PRIVATE
     webview2/BridgeProtocol.cpp
     webview2/BridgeProtocol.hpp
+    webview2/UiGeometry.cpp
+    webview2/UiGeometry.hpp
     webview2/WebView2Widget.cpp
     webview2/WebView2Widget.hpp
 )

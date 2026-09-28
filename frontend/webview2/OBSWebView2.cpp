@@ -1,5 +1,7 @@
 #include "OBSWebView2.hpp"
 #include "WebView2Widget.hpp"
+#include "UiGeometry.hpp"
+#include <QCloseEvent>
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -53,6 +55,8 @@ class OBSWebView2 final : public QWidget {
 	QHash<QString, QPointer<QAction>> actions;
 	QHash<QAction *, QString> actionIds;
 	quint64 nextAction = 0;
+	bool reportedPreviewGeometry = false;
+	bool ownsApplicationSession = QCoreApplication::arguments().contains(QStringLiteral("--webview2"));
 	QByteArray lastState;
 #ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
 	QJsonObject lastTestReply;
@@ -145,7 +149,7 @@ class OBSWebView2 final : public QWidget {
 		for (const auto &name : controlNames) {
 			if (auto *button = main->findChild<QAbstractButton *>(name)) {
 				if (button->isVisibleTo(main))
-					controls.append(QJsonObject{{"id", name}, {"text", button->text()},
+					controls.append(QJsonObject{{"id", name}, {"text", OBSWeb::ControlLabel(button->text(), button->accessibleName(), button->toolTip())},
 								    {"enabled", button->isEnabled()},
 								    {"checked", button->isChecked()}, {"checkable", button->isCheckable()}});
 			}
@@ -315,16 +319,20 @@ class OBSWebView2 final : public QWidget {
 			else
 				obs_frontend_open_source_filters(source);
 		} else if (command == QStringLiteral("preview.bounds")) {
-			const auto number = [&](const char *key) { return args.value(QLatin1String(key)).toDouble(-1); };
-			const double x = number("x"), y = number("y"), w = number("width"), h = number("height");
-			if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h) ||
-			    x < 0 || y < 0 || w < 0 || h < 0 || x + w > width() + 2 || y + h > height() + 2) {
-				reject(id, QStringLiteral("InvalidArgs"), QStringLiteral("Invalid preview bounds."));
+			const auto bounds = OBSWeb::PreviewRect(args, browser->geometry());
+			if (!bounds) {
+				reject(id, QStringLiteral("InvalidArgs"), QStringLiteral("Invalid preview bounds or viewport."));
 				return;
 			}
-			preview->setGeometry(qRound(x), qRound(y), qRound(w), qRound(h));
-			preview->setVisible(args.value("visible").toBool(true) && w > 0 && h > 0);
+			preview->setGeometry(*bounds);
+			preview->setVisible(args.value("visible").toBool(true) && !bounds->isEmpty());
 			preview->raise();
+			if (!reportedPreviewGeometry) {
+				reportedPreviewGeometry = true;
+				blog(LOG_INFO, "[WebView2] Preview viewport %.1fx%.1f CSS, host %dx%d Qt, rect %d,%d %dx%d",
+				     args.value("viewportWidth").toDouble(), args.value("viewportHeight").toDouble(),
+				     browser->width(), browser->height(), bounds->x(), bounds->y(), bounds->width(), bounds->height());
+			}
 			reply(id, QJsonObject{});
 		} else if (command == QStringLiteral("window.original")) {
 			main->showNormal();
@@ -365,6 +373,19 @@ class OBSWebView2 final : public QWidget {
 #ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
 #include "../../test/webview2/obs-integration.inl"
 #endif
+
+protected:
+	void closeEvent(QCloseEvent *event) override
+	{
+		if (!ownsApplicationSession) {
+			QWidget::closeEvent(event);
+			return;
+		}
+		// Keep this window alive if OBS declines shutdown (for example while
+		// confirming an active recording). Shutdown deletes it after acceptance.
+		event->ignore();
+		QTimer::singleShot(0, main, &QWidget::close);
+	}
 
 public:
 	explicit OBSWebView2(QMainWindow *parent, const QString &assets, const QString &profile)

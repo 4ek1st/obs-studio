@@ -16,3 +16,8 @@ include(../../cmake/windows/webview2.cmake)
 obs_find_webview2()
 target_link_libraries(host-test PRIVATE OBS::WebView2)
 target_compile_definitions(host-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+
+add_executable(ui-geometry-test ui-geometry-test.cpp ../../frontend/webview2/UiGeometry.cpp)
+target_link_libraries(ui-geometry-test PRIVATE Qt6::Core)
+target_include_directories(ui-geometry-test PRIVATE ../../frontend/webview2)
+add_test(NAME ui-geometry COMMAND ui-geometry-test)

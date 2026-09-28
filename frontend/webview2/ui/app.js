@@ -168,7 +168,7 @@ function scheduleBounds() {
     boundsFrame = 0;
     if (!connected) return;
     const bounds = $("preview").getBoundingClientRect();
-    const args = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, visible: !document.querySelector(".menu[open]") };
+    const args = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight, visible: !document.querySelector(".menu[open]") };
     const signature = JSON.stringify(args);
     if (signature === boundsSignature) return;
     boundsSignature = signature;
@@ -187,6 +187,7 @@ $("filters").addEventListener("click", () => {
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeMenus(); });
 document.addEventListener("click", event => { if (!event.target.closest(".menu")) closeMenus(); });
 new ResizeObserver(scheduleBounds).observe($("preview"));
+window.addEventListener("resize", scheduleBounds);
 window.addEventListener("pagehide", () => bridge?.dispose());
 try {
   bridge = createBridge(window.chrome?.webview);
