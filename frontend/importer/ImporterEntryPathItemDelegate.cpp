@@ -109,7 +109,11 @@ void ImporterEntryPathItemDelegate::setModelData(QWidget *editor, QAbstractItemM
 		model->setData(index, list, ImporterEntryRole::NewPath);
 	} else {
 		QLineEdit *lineEdit = editor->findChild<QLineEdit *>();
-		model->setData(index, lineEdit->text());
+		// Focus can leave the native editor when a WebView surface becomes ready.
+		// A no-op commit must not re-detect the collection (which also overwrites
+		// an edited name) or change the empty dialog's Import action state.
+		if (lineEdit->text() != index.data(Qt::DisplayRole).toString())
+			model->setData(index, lineEdit->text());
 	}
 }
 

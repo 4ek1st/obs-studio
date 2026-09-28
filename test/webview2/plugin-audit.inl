@@ -2,6 +2,7 @@
 // devices or outputs. Plugin initialization itself has already happened in OBS.
 #include <QSaveFile>
 #include "plugin-audit-dialog.hpp"
+#include "plugin-render-integration.inl"
 
 namespace {
 bool IsPluginAuditRequested()
@@ -38,7 +39,8 @@ void RunPluginAudit(OBSBasic *main, bool web)
         {"modules", modules}, {"sourceTypes", enumerate(obs_enum_source_types)},
         {"inputTypes", enumerate(obs_enum_input_types)}, {"filterTypes", enumerate(obs_enum_filter_types)},
         {"transitionTypes", enumerate(obs_enum_transition_types)},
-        {"scope", "Successful initialization and registered type IDs; no source, output, device or plugin workflow was created by this helper"}};
+        {"renderProbeRequested", args.contains(QStringLiteral("--webview2-plugin-render-test"))},
+        {"scope", "Module initialization and registered type IDs; optional private GPU workflows are reported separately in render/plugin-render.json; no devices or outputs are created"}};
     BPtr<char> defaultPath = GetAppConfigPathPtr("obs-studio/webview2-plugin-audit.json");
     const QString artifactDirectory = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
     const QString path = artifactDirectory.isEmpty() ? QString::fromUtf8(defaultPath.Get()) :
@@ -59,11 +61,17 @@ void RunPluginAudit(OBSBasic *main, bool web)
         if (closed) blog(LOG_INFO, "[Plugin audit] Continued past %d native plugin warning(s)", closed);
     };
     const QPointer<OBSBasic> owner = main;
-    QTimer::singleShot(100, qApp, [owner, dismissWarning] {
+    const auto finish = [owner, dismissWarning] {
         dismissWarning();
         if (owner) owner->close();
         QTimer::singleShot(100, qApp, dismissWarning);
         QTimer::singleShot(500, qApp, dismissWarning);
-    });
+    };
+    if (args.contains(QStringLiteral("--webview2-plugin-render-test")) && QFileInfo(artifactDirectory).isAbsolute()) {
+        dismissWarning();
+        (new PluginRenderChecks(main, web, artifactDirectory, finish))->run();
+    } else {
+        QTimer::singleShot(100, qApp, finish);
+    }
 }
 } // namespace

@@ -1,0 +1,47 @@
+diff --git a/src/obs-composite-blur-filter.c b/src/obs-composite-blur-filter.c
+index 20efbd1..f8d4a73 100644
+--- a/src/obs-composite-blur-filter.c
++++ b/src/obs-composite-blur-filter.c
+@@ -249,7 +249,7 @@ static void composite_blur_destroy(void *data)
+ 		gs_texture_destroy(filter->kernel_texture);
+ 	}
+ 	if (filter->mask_image) {
+-		gs_image_file_free(filter->mask_image);
++		gs_image_file_ex_free(filter->mask_image);
+ 		bfree(filter->mask_image);
+ 	}
+ 
+@@ -443,16 +443,16 @@ static void composite_blur_update(void *data, obs_data_t *settings)
+ 		obs_data_get_string(settings, "effect_mask_source_file");
+ 
+ 	if (filter->mask_image == NULL) {
+-		filter->mask_image = bzalloc(sizeof(gs_image_file_t));
++		filter->mask_image = bzalloc(sizeof(gs_image_file_ex_t));
+ 	} else {
+ 		obs_enter_graphics();
+-		gs_image_file_free(filter->mask_image);
++		gs_image_file_ex_free(filter->mask_image);
+ 		obs_leave_graphics();
+ 	}
+ 	if (strlen(mask_image_file)) {
+-		gs_image_file_init(filter->mask_image, mask_image_file);
++		gs_image_file_ex_init(filter->mask_image, mask_image_file, GS_IMAGE_ALPHA_STRAIGHT);
+ 		obs_enter_graphics();
+-		gs_image_file_init_texture(filter->mask_image);
++		gs_image_file_ex_init_texture(filter->mask_image);
+ 		obs_leave_graphics();
+ 	}
+ 	filter->mask_source_multiplier = (float)obs_data_get_double(
+diff --git a/src/obs-composite-blur-filter.h b/src/obs-composite-blur-filter.h
+index 5037bce..1b5d075 100644
+--- a/src/obs-composite-blur-filter.h
++++ b/src/obs-composite-blur-filter.h
+@@ -303,7 +303,7 @@ struct composite_blur_filter_data {
+ 	float mask_rect_corner_radius;
+ 	float mask_rect_feathering;
+ 	float mask_rect_inv;
+-	gs_image_file_t *mask_image;
++	gs_image_file_ex_t *mask_image;
+ 
+ 	// Output Effect Parameters
+ 	gs_eparam_t *param_output_image;

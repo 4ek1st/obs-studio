@@ -1,5 +1,23 @@
 # Plugin compatibility audit
 
+## Compatibility builds added after the audit
+
+The original failures below are now addressed by opt-in source builds in
+[plugins/compatibility](../../plugins/compatibility/README.md): Composite Blur
+`1.5.2+obs33.1` and Shaderfilter `2.6.0+obs33.1`. They replace the retired image
+API, its structure allocation and texture lifecycle with `gs_image_file_ex`,
+preserving the old straight-alpha mode and filter/settings identifiers.
+
+The final paired probe loaded all 15 tested third-party modules: 39 modules and
+79 source IDs in each frontend. Each frontend also passed 29 GPU workflow checks
+covering masks/textures, replacement, missing-file recovery, save/reload and
+disable. All 13 output frame pairs were byte-identical; both processes exited
+with code 0. The final DLLs and upstream data/licenses were installed only in the
+portable fork. The personal OBS 32 binaries remain untouched. See the
+[follow-up report](remaining-fixes-2026-09-28.md) for hashes, evidence and limits.
+
+## Original binary audit
+
 The paired probe uses the same OBS 33 binaries with either the original Qt
 frontend or the WebView2 frontend. Plugin binaries and shipped data are copied
 unchanged into separate disposable portable directories. Personal settings are

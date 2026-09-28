@@ -1,0 +1,56 @@
+diff --git a/obs-shaderfilter.c b/obs-shaderfilter.c
+index 903caec..363be42 100644
+--- a/obs-shaderfilter.c
++++ b/obs-shaderfilter.c
+@@ -129,7 +129,7 @@ struct effect_param_data {
+ 	enum gs_shader_param_type type;
+ 	gs_eparam_t *param;
+ 
+-	gs_image_file_t *image;
++	gs_image_file_ex_t *image;
+ 	gs_texrender_t *render;
+ 	obs_weak_source_t *source;
+ 
+@@ -376,7 +376,7 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
+ 		struct effect_param_data *param = (filter->stored_param_list.array + param_index);
+ 		if (param->image) {
+ 			obs_enter_graphics();
+-			gs_image_file_free(param->image);
++			gs_image_file_ex_free(param->image);
+ 			obs_leave_graphics();
+ 
+ 			bfree(param->image);
+@@ -2658,7 +2658,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
+ 				}
+ 				obs_source_release(source);
+ 				if (param->image) {
+-					gs_image_file_free(param->image);
++					gs_image_file_ex_free(param->image);
+ 					param->image = NULL;
+ 				}
+ 				dstr_free(&param->path);
+@@ -2688,20 +2688,20 @@ static void shader_filter_update(void *data, obs_data_t *settings)
+ 				path = obs_data_get_string(settings, param_name);
+ 				bool n = false;
+ 				if (param->image == NULL) {
+-					param->image = bzalloc(sizeof(gs_image_file_t));
++					param->image = bzalloc(sizeof(gs_image_file_ex_t));
+ 					n = true;
+ 				}
+ 				if (n || !path || !param->path.array || strcmp(path, param->path.array) != 0) {
+ 
+ 					if (!n) {
+ 						obs_enter_graphics();
+-						gs_image_file_free(param->image);
++						gs_image_file_ex_free(param->image);
+ 						obs_leave_graphics();
+ 					}
+-					gs_image_file_init(param->image, path);
++					gs_image_file_ex_init(param->image, path, GS_IMAGE_ALPHA_STRAIGHT);
+ 					dstr_copy(&param->path, path);
+ 					obs_enter_graphics();
+-					gs_image_file_init_texture(param->image);
++					gs_image_file_ex_init_texture(param->image);
+ 					obs_leave_graphics();
+ 				}
+ 				obs_source_t *old_source = obs_weak_source_get_source(param->source);

@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory = $true)][string]$SeedConfig,
     [string]$UpdatedExecutable,
     [string]$WebAssets,
+    [string]$CompatibilityPackage,
     [string]$InstalledRoot = 'C:\Program Files\obs-studio',
     [string]$SystemPluginRoot = 'C:\ProgramData\obs-studio\plugins'
 )
@@ -69,6 +70,21 @@ $copyPlan = @(foreach ($name in $names) {
     })
     [ordered]@{ name = $name; binary = $binary; data = $data; dataPresent = (Test-Path -LiteralPath $data -PathType Container); sidecars = $extras }
 })
+if ($CompatibilityPackage) {
+    $compatibilityRoot = (Resolve-Path -LiteralPath $CompatibilityPackage).Path
+    foreach ($name in @('obs-composite-blur', 'obs-shaderfilter')) {
+        $entry = @($copyPlan | Where-Object { $_.name -eq $name })[0]
+        $root = Join-Path $compatibilityRoot ('plugins/' + $name)
+        $binary = Join-Path $root ($name + '.dll')
+        if (!(Test-Path -LiteralPath $binary -PathType Leaf) -or !(Test-Path -LiteralPath (Join-Path $root 'data') -PathType Container)) {
+            throw "Incomplete compatibility package: $name"
+        }
+        $entry['originalBinary'] = $entry.binary
+        $entry.binary = $binary
+        $entry.data = Join-Path $root 'data'
+        $entry.dataPresent = $true
+    }
+}
 [IO.Directory]::CreateDirectory($destination) | Out-Null
 $manifests = @()
 foreach ($mode in @('native-qt', 'webview2')) {
@@ -106,10 +122,10 @@ foreach ($mode in @('native-qt', 'webview2')) {
     $manifests += [ordered]@{ mode = $mode; root = $stage; executableSha256 = (Get-FileHash -LiteralPath (Join-Path $stage 'bin/64bit/obs64.exe') -Algorithm SHA256).Hash; pluginFiles = $files; webAssets = $assets; seedFiles = $seedFiles }
 }
 $manifest = [ordered]@{ evidence = $inventory.evidence; sourceStage = $source; copyPlan = $copyPlan; stages = $manifests;
-    updatedExecutable = $updatedBinary; assetSource = $assetSource;
+    updatedExecutable = $updatedBinary; assetSource = $assetSource; compatibilityPackage = $CompatibilityPackage;
     seed = [ordered]@{ path = $seed; sourceIds = @($seedSourceIds | Sort-Object -Unique); collectionFiles = @($sceneFiles.Name); files = $seedFiles };
     omitted = @('obs-toolbar: not present in supplied loaded-module evidence', 'obs-ios-camera-source: not present in supplied loaded-module evidence', 'StreamFX: not present in supplied loaded-module evidence');
-    scope = 'Same OBS33 binaries; exact logged custom module binaries and shipped data; identical explicit silent fixture configuration, no personal configuration. No process launched by staging.' }
+    scope = 'Same OBS33 binaries; logged custom modules with explicitly recorded compatibility replacements when requested; identical explicit silent fixture configuration, no personal configuration. No process launched by staging.' }
 $json = $manifest | ConvertTo-Json -Depth 12
 [IO.File]::WriteAllText((Join-Path $destination 'stage-manifest.json'), $json, [Text.UTF8Encoding]::new($false))
 $json

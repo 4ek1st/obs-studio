@@ -2,6 +2,7 @@
 // and artifacts directory; no production recording/profile paths are discovered.
 #include <models/SceneCollection.hpp>
 #include <QAbstractItemModel>
+#include <QAbstractItemDelegate>
 #include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
@@ -124,8 +125,7 @@ class ToolDataWorkflowChecks final : public QObject {
             } else {
                 editor->selectAll(); editor->insert(text);
                 // Match clicking the action after editing: an actual focus
-                // change commits the native delegate. Tab would also enter the
-                // Importer's Path editor, whose later commit reloads its name.
+                // change commits the native delegate.
                 auto *box = current->findChild<QDialogButtonBox *>();
                 QWidget *target = box && box->button(QDialogButtonBox::Ok) ?
                     static_cast<QWidget *>(box->button(QDialogButtonBox::Ok)) : static_cast<QWidget *>(view.data());
@@ -224,6 +224,12 @@ class ToolDataWorkflowChecks final : public QObject {
         config_set_bool(config, "General", "AutoSearchPrompt", true);
         config_set_bool(config, "General", "AutomaticCollectionSearch", false);
         open("actionImportSceneCollection", "OBSImporter", [this] {
+            auto *emptyTable = current->findChild<QTableView *>();
+            auto *box = current->findChild<QDialogButtonBox *>();
+            check(box && box->button(QDialogButtonBox::Ok)->isEnabled(),
+                "Empty Import dialog preserves the original initial Import action after frontend focus transfer");
+            check(unchangedImportPath(emptyTable, 0),
+                "Committing the unchanged empty Import path does not emit a model change");
             const bool delivered = dropFile(QDir(directory).filePath("collection.json"));
             auto *table = current->findChild<QTableView *>();
             check(delivered && table && table->model()->rowCount() == 2 &&
@@ -234,6 +240,10 @@ class ToolDataWorkflowChecks final : public QObject {
             editCell(table, 0, 1, renamedCollection, [this](bool edited) {
                 check(edited, "Importer collection name is changed through its native model editor");
                 if (!edited) { closeTool([this] { finish(); }); return; }
+                auto *view = current->findChild<QTableView *>();
+                check(unchangedImportPath(view, 0) && view->model()->index(0, 1).data().toString() == renamedCollection &&
+                    view->model()->index(0, 0).data(Qt::CheckStateRole).toInt() == Qt::Checked,
+                    "Leaving an unchanged Import path preserves the edited name and selection without a model change");
                 check(button(QDialogButtonBox::Ok), "Original Import button executes the real collection importer");
                 waitFor([this] { return main && main->GetSceneCollectionByName(renamedCollection.toStdString()).has_value(); }, [this] {
                     const auto imported = main->GetSceneCollectionByName(renamedCollection.toStdString());
@@ -249,6 +259,22 @@ class ToolDataWorkflowChecks final : public QObject {
                 }, 10000, "Imported collection appears in the native collection catalog", [this] { finish(); });
             });
         }, [this] { finish(); });
+    }
+    bool unchangedImportPath(QTableView *table, int row) {
+        if (!table || !table->model()) return false;
+        const auto index = table->model()->index(row, 2);
+        auto *delegate = table->itemDelegateForColumn(2);
+        if (!delegate) return false;
+        auto *editor = delegate->createEditor(table, QStyleOptionViewItem(), index);
+        if (!editor) return false;
+        delegate->setEditorData(editor, index);
+        int changes = 0;
+        const auto connection = connect(table->model(), &QAbstractItemModel::dataChanged,
+            this, [&changes] { ++changes; });
+        delegate->setModelData(editor, table->model(), index);
+        disconnect(connection);
+        delete editor;
+        return changes == 0;
     }
     void finish() {
         if (finished) return;
