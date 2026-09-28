@@ -9,6 +9,6 @@ $executable = Join-Path $binaryDirectory 'obs64.exe'
 if (!(Test-Path -LiteralPath $executable)) {
     throw "Build OBS first. Expected executable: $executable"
 }
-$arguments = @('--portable', '--webview2', '--disable-updater', '--disable-missing-files-check')
+$arguments = @('--portable', '--webview2', '--multi', '--disable-updater', '--disable-missing-files-check')
 if ($OnlyBundledPlugins) { $arguments += '--only-bundled-plugins' }
 Start-Process -FilePath $executable -WorkingDirectory $binaryDirectory -ArgumentList $arguments -WindowStyle Hidden
