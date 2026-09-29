@@ -198,13 +198,9 @@ void runDockTabDetachChecks(std::function<void(bool, const char *)> check, std::
 
 void runWindowFrameChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
 {
-    auto captureFrame = [](QWidget *window, const QString &name) -> QImage {
+    auto captureHandle = [](HWND hwnd, const QString &name) -> QImage {
         const auto artifacts = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
-        if (!window) return {};
-        window->raise();
-        window->activateWindow();
-        QCoreApplication::processEvents();
-        const auto hwnd = reinterpret_cast<HWND>(window->winId());
+        if (!hwnd) return {};
         RECT rect{};
         if (!GetWindowRect(hwnd, &rect)) return {};
         const int width = rect.right - rect.left;
@@ -237,6 +233,13 @@ void runWindowFrameChecks(std::function<void(bool, const char *)> check, std::fu
         ReleaseDC(hwnd, source);
         return image;
     };
+    auto captureFrame = [captureHandle](QWidget *window, const QString &name) -> QImage {
+        if (!window) return {};
+        window->raise();
+        window->activateWindow();
+        QCoreApplication::processEvents();
+        return captureHandle(reinterpret_cast<HWND>(window->winId()), name);
+    };
     auto matchesPalette = [](const QImage &frame, const QWidget *window) {
         if (frame.isNull() || frame.width() < 16 || frame.height() < 16 || !window) return false;
         const QColor expected = window->palette().color(QPalette::Window);
@@ -265,6 +268,17 @@ void runWindowFrameChecks(std::function<void(bool, const char *)> check, std::fu
           changedFrame.pixelColor(changedFrame.width() / 2, 5) != dialogFrame.pixelColor(dialogFrame.width() / 2, 5),
           "Changing a window's palette updates its native title frame without reopening it");
     dialog.close();
+
+    HWND native = CreateWindowExW(0, L"STATIC", L"WebView2 native dialog frame test", WS_OVERLAPPEDWINDOW,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 360, 180, nullptr, nullptr,
+                                  GetModuleHandleW(nullptr), nullptr);
+    if (native) {
+        ShowWindow(native, SW_SHOWNOACTIVATE);
+        QCoreApplication::processEvents();
+        const auto nativeFrame = captureHandle(native, QStringLiteral("frame-native-window.png"));
+        check(matchesPalette(nativeFrame, main), "Native Windows dialogs owned by OBS also receive the application theme");
+        DestroyWindow(native);
+    } else check(false, "Native Windows dialog frame fixture exists");
 
     auto *dock = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
     auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));

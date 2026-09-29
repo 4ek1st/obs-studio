@@ -95,7 +95,44 @@ namespace {
 class ThemeWindowFrames final : public QObject {
     using SetAttribute = HRESULT(WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
     struct AppliedFrame { WId id; COLORREF caption; COLORREF text; BOOL dark; };
+    static inline ThemeWindowFrames *instance = nullptr;
     QHash<QWidget *, AppliedFrame> applied;
+    HWINEVENTHOOK showHook = nullptr;
+
+    static bool setFrame(HWND hwnd, COLORREF caption, COLORREF text, BOOL dark, const char *name)
+    {
+        static auto setAttribute = reinterpret_cast<SetAttribute>(QLibrary::resolve(QStringLiteral("dwmapi"), "DwmSetWindowAttribute"));
+        if (!setAttribute) return false;
+        const auto darkResult = setAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+        const auto captionResult = setAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+        const auto borderResult = setAttribute(hwnd, DWMWA_BORDER_COLOR, &caption, sizeof(caption));
+        const auto textResult = setAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
+        if (FAILED(darkResult) || FAILED(captionResult) || FAILED(borderResult) || FAILED(textResult)) {
+            blog(LOG_WARNING, "[WebView2] Theme frame attributes unavailable for %s: dark=%lx caption=%lx border=%lx text=%lx",
+                 name, darkResult, captionResult, borderResult, textResult);
+            return false;
+        }
+        return true;
+    }
+
+    static void CALLBACK windowShown(HWINEVENTHOOK, DWORD, HWND hwnd, LONG objectId, LONG childId, DWORD, DWORD)
+    {
+        if (!instance || !hwnd || objectId != OBJID_WINDOW || childId != CHILDID_SELF) return;
+        DWORD processId = 0;
+        GetWindowThreadProcessId(hwnd, &processId);
+        if (processId != GetCurrentProcessId() || GetAncestor(hwnd, GA_ROOT) != hwnd ||
+            !(GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION)) return;
+        if (auto *widget = QWidget::find(reinterpret_cast<WId>(hwnd)); widget && widget->isWindow()) {
+            instance->apply(widget);
+            return;
+        }
+        const auto palette = qApp->palette();
+        const QColor background = palette.color(QPalette::Window);
+        const QColor foreground = palette.color(QPalette::WindowText);
+        setFrame(hwnd, RGB(background.red(), background.green(), background.blue()),
+                 RGB(foreground.red(), foreground.green(), foreground.blue()),
+                 background.lightness() < 128, "native application dialog");
+    }
 
     static bool hasCaption(QWidget *window)
     {
@@ -105,15 +142,26 @@ class ThemeWindowFrames final : public QObject {
     }
 
 public:
-    explicit ThemeWindowFrames(QObject *parent) : QObject(parent) { qApp->installEventFilter(this); }
+    explicit ThemeWindowFrames(QObject *parent) : QObject(parent)
+    {
+        instance = this;
+        qApp->installEventFilter(this);
+        showHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr, &windowShown,
+                                   GetCurrentProcessId(), 0, WINEVENT_OUTOFCONTEXT);
+    }
+
+    ~ThemeWindowFrames() override
+    {
+        if (showHook) UnhookWinEvent(showHook);
+        instance = nullptr;
+        qApp->removeEventFilter(this);
+    }
 
     void apply(QWidget *window)
     {
         if (!hasCaption(window)) return;
         const auto id = window->internalWinId();
         if (!id) return;
-        static auto setAttribute = reinterpret_cast<SetAttribute>(QLibrary::resolve(QStringLiteral("dwmapi"), "DwmSetWindowAttribute"));
-        if (!setAttribute) return;
         const auto palette = window->palette();
         const QColor background = palette.color(QPalette::Window);
         const QColor foreground = palette.color(QPalette::WindowText);
@@ -124,14 +172,7 @@ public:
         if (previous != applied.cend() && previous->id == id && previous->caption == caption &&
             previous->text == text && previous->dark == dark) return;
         const auto hwnd = reinterpret_cast<HWND>(id);
-        const auto darkResult = setAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
-        const auto captionResult = setAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
-        const auto borderResult = setAttribute(hwnd, DWMWA_BORDER_COLOR, &caption, sizeof(caption));
-        const auto textResult = setAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
-        if (FAILED(darkResult) || FAILED(captionResult) || FAILED(borderResult) || FAILED(textResult))
-            blog(LOG_WARNING, "[WebView2] Theme frame attributes unavailable for %s: dark=%lx caption=%lx border=%lx text=%lx",
-                 window->objectName().toUtf8().constData(), darkResult, captionResult, borderResult, textResult);
-        else {
+        if (setFrame(hwnd, caption, text, dark, window->objectName().toUtf8().constData())) {
             if (previous == applied.cend())
                 connect(window, &QObject::destroyed, this, [this, window] { applied.remove(window); });
             applied.insert(window, {id, caption, text, dark});
@@ -859,8 +900,14 @@ public:
         preview->hide();
         audio = std::make_unique<OBSWeb::AudioMixerBridge>(main);
         meterTimer = new QTimer(this);
-        meterTimer->setInterval(50);
+        // Match OBS's native VolumeMeter refresh cadence instead of stepping at 20 Hz.
+        meterTimer->setTimerType(Qt::PreciseTimer);
+        meterTimer->setInterval(16);
         connect(meterTimer, &QTimer::timeout, this, [this] {
+            if (property("webview2NativeDocking").toBool()) {
+                auto *dock = main->findChild<QDockWidget *>(QStringLiteral("mixerDock"));
+                if (!dock || !dock->isVisible()) return;
+            }
             postWorkspaceMessage(QJsonObject{{"version", 1}, {"event", "audio.levels"}, {"data", audio->levels()}});
         });
         InstallWebView2Dialogs(main, assets, profile);

@@ -396,6 +396,16 @@ function updateLevels(levels) {
     });
   }
 }
+let pendingLevels,levelsFrame=0;
+function scheduleLevels(levels) {
+  pendingLevels=levels;
+  if(levelsFrame)return;
+  levelsFrame=requestAnimationFrame(()=>{
+    levelsFrame=0;
+    const latest=pendingLevels;pendingLevels=undefined;
+    updateLevels(latest);
+  });
+}
 function renderTransitions(next) {
   if(rendersPanel("transitionsDock")){
   const select=$("transition-type"),signature=JSON.stringify(next.transitions||[]);
@@ -694,7 +704,7 @@ document.addEventListener("toggle",scheduleBounds,true);
 new ResizeObserver(scheduleBounds).observe($("preview"));new ResizeObserver(scheduleBounds).observe($("program"));
 new ResizeObserver(()=>{if(state)renderSceneGrid(state);}).observe($("scenes"));
 window.addEventListener("resize",scheduleBounds);window.addEventListener("pagehide",()=>bridge?.dispose());
-try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",updateLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignature="";scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel","native-dock-panel");if(state)renderWorkspace(state);});}
+try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",scheduleLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignature="";scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel","native-dock-panel");if(state)renderWorkspace(state);});}
 catch(error){showError(error);$("connection").textContent="Нет соединения с OBS";}
 if(bridge)present=createPresentation(bridge);
 if(bridge)bridge.subscribe("workspace.rename",data=>{if((data?.kind==="source"&&panelMode==="sourcesDock")||(data?.kind==="scene"&&panelMode==="scenesDock")){const rows=data.kind==="source"?state?.sources:state?.scenes;const row=rows?.find(row=>data.kind==="source"?keyOf(row)===keyOf(data.row):row.uuid===data.row?.uuid);if(row)rename(data.kind,row);}});

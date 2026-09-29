@@ -36,6 +36,23 @@ test("native clipping holds the bar full and idle clears the input indicator", (
   assert.equal(bars[0].input.hidden, true);
 });
 
+test("bursty native meter messages draw only the newest level in one browser frame", () => {
+  const bar = { peak: element(), hold: element(), magnitude: element(), input: element() };
+  const frames = [];
+  const source = app.slice(app.indexOf("function updateLevels("), app.indexOf("function renderTransitions("));
+  vm.runInNewContext(source + `
+    scheduleLevels({fixture:{minimum:-60,channels:[{peak:-18}]}});
+    scheduleLevels({fixture:{minimum:-60,channels:[{peak:-42}]}});
+  `, {
+    audioElements: new Map([["fixture", { bars: [bar] }]]),
+    rendersPanel: () => true,
+    requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
+  });
+  assert.equal(frames.length, 1);
+  frames[0]();
+  assert.equal(bar.peak.properties.get("--peak-empty"), "70%");
+});
+
 function faderInput(type, overrides = {}, focused = true) {
   const handlers = new Map(), calls = [];
   const volume = { disabled: false, addEventListener(name, callback) { handlers.set(name, callback); } };
