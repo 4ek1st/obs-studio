@@ -63,6 +63,8 @@
 #include <QMouseEvent>
 #include <QEnterEvent>
 #include <QToolButton>
+#include <QTabBar>
+#include <QTabWidget>
 #include <QStyle>
 #include <QStyleOptionDockWidget>
 #include <QPainter>
@@ -70,6 +72,7 @@
 #include <QWindow>
 #include <QApplication>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <mutex>
 
@@ -145,6 +148,8 @@ class OBSWebView2 final : public QWidget {
 	QMainWindow *main;
 	QPointer<QWidget> nativeCentral;
 	bool workspaceMounted = false;
+	std::array<QTabWidget::TabPosition, 4> nativeDockTabPositions{};
+	bool dockTabPositionsSaved = false;
 	WebView2Widget *browser;
 	OBSQTDisplay *preview;
 	QPointer<OBSQTDisplay> programPreview;
@@ -646,6 +651,16 @@ public:
 	void mountWorkspace()
 	{
 		if (workspaceMounted) return;
+		if (!dockTabPositionsSaved) {
+			int index = 0;
+			for (const auto area : {Qt::LeftDockWidgetArea, Qt::RightDockWidgetArea,
+			                        Qt::TopDockWidgetArea, Qt::BottomDockWidgetArea})
+				nativeDockTabPositions[index++] = main->tabPosition(area);
+			dockTabPositionsSaved = true;
+		}
+		// A combined dock should reveal both panel names beside its header.
+		// QMainWindow still owns native drag, tab switching and layout persistence.
+		main->setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
 		nativeCentral = main->takeCentralWidget();
 		if (nativeCentral) {
 			// Keep ui pointers, source toolbars and Studio Mode controllers alive
@@ -663,6 +678,13 @@ public:
 	void unmountWorkspace()
 	{
 		if (!workspaceMounted) return;
+		if (dockTabPositionsSaved) {
+			int index = 0;
+			for (const auto area : {Qt::LeftDockWidgetArea, Qt::RightDockWidgetArea,
+			                        Qt::TopDockWidgetArea, Qt::BottomDockWidgetArea})
+				main->setTabPosition(area, nativeDockTabPositions[index++]);
+			dockTabPositionsSaved = false;
+		}
 		workspaceMounted = false;
 		setProperty("webview2NativeDocking", false);
 		main->setProperty("webview2NativeDocking", false);

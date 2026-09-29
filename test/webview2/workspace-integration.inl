@@ -13,6 +13,122 @@ void traceWorkspacePreview(const char *phase) const
         geometry.x(), geometry.y(), geometry.width(), geometry.height());
 }
 
+void runDockTabsChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
+{
+    auto *scenes = main->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
+    auto *controls = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
+    auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
+    check(scenes && controls && lock, "Native Scenes, Controls and dock lock controls exist");
+    if (!scenes || !controls || !lock) { done(); return; }
+    const auto layout = main->saveState();
+    const bool wasLocked = lock->isChecked();
+    lock->setChecked(false);
+    main->showNormal();
+    main->resize(1280, 840);
+    main->addDockWidget(Qt::LeftDockWidgetArea, scenes);
+    main->addDockWidget(Qt::RightDockWidgetArea, controls);
+    scenes->show();
+    controls->show();
+    main->tabifyDockWidget(scenes, controls);
+    controls->raise();
+    QTimer::singleShot(200, this, [this, scenes = QPointer<QDockWidget>(scenes),
+        controls = QPointer<QDockWidget>(controls), lock = QPointer<QAction>(lock),
+        layout, wasLocked, check, done] {
+        if (!scenes || !controls) { check(false, "Tab test docks survive tabification"); done(); return; }
+        auto findTabs = [this, scenes, controls]() -> QTabBar * {
+            for (auto *bar : main->findChildren<QTabBar *>()) {
+                bool hasScenes = false, hasControls = false;
+                for (int i = 0; i < bar->count(); ++i) {
+                    hasScenes |= bar->tabText(i) == scenes->windowTitle();
+                    hasControls |= bar->tabText(i) == controls->windowTitle();
+                }
+                if (hasScenes && hasControls) return bar;
+            }
+            return nullptr;
+        };
+        auto *tabs = findTabs();
+        check(main->tabifiedDockWidgets(scenes).contains(controls) && tabs && tabs->isVisible() && tabs->count() >= 2,
+              "Combining two panels displays both named native tabs");
+        check(main->tabPosition(main->dockWidgetArea(scenes)) == QTabWidget::North && tabs &&
+              tabs->mapToGlobal(QPoint(0, 0)).y() < controls->mapToGlobal(QPoint(0, 0)).y(),
+              "Combined panel names appear in a tab strip above the panel content");
+        if (tabs) {
+            auto clickTab = [tabs](int index) {
+                const auto global = tabs->mapToGlobal(tabs->tabRect(index).center());
+                const QPointF local = tabs->mapFromGlobal(global);
+                QMouseEvent press(QEvent::MouseButtonPress, local, local, QPointF(global), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QMouseEvent release(QEvent::MouseButtonRelease, local, local, QPointF(global), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(tabs, &press);
+                QApplication::sendEvent(tabs, &release);
+                QCoreApplication::processEvents();
+            };
+            int sceneIndex = -1, controlsIndex = -1;
+            for (int i = 0; i < tabs->count(); ++i) {
+                if (tabs->tabText(i) == scenes->windowTitle()) sceneIndex = i;
+                if (tabs->tabText(i) == controls->windowTitle()) controlsIndex = i;
+            }
+            if (sceneIndex >= 0 && controlsIndex >= 0) {
+                clickTab(sceneIndex);
+                const bool sceneSelected = tabs->currentIndex() == sceneIndex && scenes->isVisible() &&
+                    webDockViews.value(scenes) && webDockViews.value(scenes)->isVisible();
+                clickTab(controlsIndex);
+                check(sceneSelected && tabs->currentIndex() == controlsIndex && controls->isVisible() &&
+                      webDockViews.value(controls) && webDockViews.value(controls)->isVisible(),
+                      "Clicking either panel name switches the active native WebView dock");
+            } else check(false, "Both panel names are clickable native tabs");
+        }
+        const auto tabbed = main->saveState();
+        main->addDockWidget(Qt::RightDockWidgetArea, controls);
+        check(main->restoreState(tabbed) && main->tabifiedDockWidgets(scenes).contains(controls),
+              "Saving and restoring layout keeps both panels in the same tab group");
+        const auto artifacts = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
+        if (!artifacts.isEmpty()) {
+            main->grab().save(QDir(artifacts).filePath(QStringLiteral("dock-tabs.png")));
+        }
+        main->addDockWidget(Qt::RightDockWidgetArea, controls);
+        scenes->show();
+        scenes->raise();
+        QCoreApplication::processEvents();
+        controls->setFloating(true);
+        controls->resize(320, 300);
+        controls->show();
+        auto *title = controls->titleBarWidget();
+        check(title && controls->isFloating(), "Movable panel has its original floating Qt drag handle");
+        if (title) {
+            auto mouse = [](QWidget *target, QEvent::Type type, QPoint global, Qt::MouseButton button, Qt::MouseButtons buttons) {
+                const QPointF local = target->mapFromGlobal(global);
+                QMouseEvent event(type, local, local, QPointF(global), button, buttons, Qt::NoModifier);
+                QApplication::sendEvent(target, &event);
+            };
+            const QPoint grip = title->mapToGlobal(QPoint(20, title->height() / 2));
+            const QPoint target = scenes->mapToGlobal(scenes->rect().center());
+            blog(LOG_INFO, "[WebView2 tab drag] scenes visible=%d floating=%d rect=%d,%d %dx%d target=%d,%d main=%d,%d %dx%d controls floating=%d grip=%d,%d",
+                scenes->isVisible(), scenes->isFloating(), scenes->x(), scenes->y(), scenes->width(), scenes->height(),
+                target.x(), target.y(), main->x(), main->y(), main->width(), main->height(), controls->isFloating(), grip.x(), grip.y());
+            mouse(title, QEvent::MouseButtonPress, grip, Qt::LeftButton, Qt::LeftButton);
+            mouse(title, QEvent::MouseMove, grip + QPoint(80, 50), Qt::NoButton, Qt::LeftButton);
+            mouse(title, QEvent::MouseMove, target, Qt::NoButton, Qt::LeftButton);
+            auto *indicator = main->findChild<QWidget *>(QStringLiteral("qt_rubberband"));
+            check(indicator && indicator->isVisible(), "Dragging over another panel shows an accepted native dock target");
+            mouse(title, QEvent::MouseButtonRelease, target, Qt::LeftButton, Qt::NoButton);
+        }
+        QTimer::singleShot(180, this, [this, scenes, controls, lock, layout, wasLocked, check, done] {
+            check(scenes && controls && !controls->isFloating() &&
+                  main->tabifiedDockWidgets(scenes).contains(controls),
+                  "Dropping one panel onto another joins them as clickable native tabs");
+            restoreSurfaces();
+            check(main->tabPosition(Qt::LeftDockWidgetArea) == nativeDockTabPositions[0],
+                  "Switching back to original OBS restores its previous native tab placement");
+            resumeFrontend();
+            check(main->tabPosition(Qt::LeftDockWidgetArea) == QTabWidget::North,
+                  "Resuming WebView2 places combined panel tabs beside their headers again");
+            main->restoreState(layout);
+            if (lock) lock->setChecked(wasLocked);
+            done();
+        });
+    });
+}
+
 void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
 {
     const QRect video = preview->geometry().translated(-browser->pos());
