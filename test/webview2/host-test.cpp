@@ -27,6 +27,7 @@ int main(int argc, char **argv)
 	widget.resize(800, 500);
 	bool echoed = false;
 	bool stayedLocal = false;
+	bool initialCommand = false;
 	QObject::connect(&widget, &WebView2Widget::ready, &app, [&] {
 		widget.postMessage(QJsonObject{{"event", "test.ping"}, {"token", "native-to-webview"}});
 	});
@@ -36,11 +37,13 @@ int main(int argc, char **argv)
 	});
 	QObject::connect(&widget, &WebView2Widget::messageReceived, &app, [&](const QJsonObject &message) {
 		const auto command = message.value("command").toString();
+		if (command == "test.initial")
+			initialCommand = true;
 		if (command == "test.echo")
 			echoed = message.value("args").toObject().value("token") == "native-to-webview";
 		if (command == "test.stayedLocal")
 			stayedLocal = message.value("args").toObject().value("origin") == "https://obs-ui.example";
-		if (echoed && stayedLocal) {
+		if (initialCommand && echoed && stayedLocal) {
 			QFile timings(timingPath);
 			QHash<qint64, double> navigationStarts;
 			double navigationMs = -1;
@@ -59,12 +62,13 @@ int main(int argc, char **argv)
 				app.exit(1);
 				return;
 			}
-			std::cout << "PASS: native WebView2 round trip, blocked navigation, early-close smoke\n";
+			std::cout << "PASS: startup command, native WebView2 round trip, blocked navigation, early-close smoke\n";
 			app.exit(0);
 		}
 	});
 	QTimer::singleShot(20000, &app, [&] {
-		std::cerr << "FAIL: native WebView2 handshake timed out\n";
+		std::cerr << "FAIL: native WebView2 handshake timed out (startup=" << initialCommand
+			  << ", echo=" << echoed << ", local=" << stayedLocal << ")\n";
 		app.exit(1);
 	});
 	return app.exec();

@@ -33,6 +33,7 @@ private:
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 	void initialize();
+	void deliverRequest(const QJsonObject &message);
 	void presentFrame();
 	void updateBounds();
 	void queueBoundsUpdate();

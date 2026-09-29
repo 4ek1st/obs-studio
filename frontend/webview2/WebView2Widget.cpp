@@ -14,6 +14,7 @@
 #include <QJsonArray>
 #include <QPointer>
 #include <QTimer>
+#include <QVector>
 #include <QWindow>
 #include <Windows.h>
 #include <objbase.h>
@@ -37,6 +38,7 @@ struct WebView2Widget::Impl {
 	ComPtr<ICoreWebView2Environment> environment;
 	ComPtr<ICoreWebView2Controller> controller;
 	ComPtr<ICoreWebView2> webview;
+	QVector<QJsonObject> queuedRequests;
 	// A caller-supplied JSONL path; no diagnostics are written by default.
 	QString timingFile = qEnvironmentVariable("OBS_WEBVIEW2_TRACE_PERFORMANCE");
 	QElapsedTimer startupTime;
@@ -189,13 +191,17 @@ void WebView2Widget::initialize()
 							EventRegistrationToken token;
 							state.webview->add_NavigationStarting(
 								Callback<ICoreWebView2NavigationStartingEventHandler>(
-									[](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
+									[guard](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
 										LPWSTR uri = nullptr;
 										args->get_Uri(&uri);
 										const bool local = uri && OBSWeb::IsLocalUi(QUrl(QString::fromWCharArray(uri)));
 										CoTaskMemFree(uri);
 										if (!local)
 											args->put_Cancel(TRUE);
+										else if (guard) {
+											guard->impl->loaded = false;
+											guard->impl->queuedRequests.clear();
+										}
 										return S_OK;
 									}).Get(), &token);
 							state.webview->add_NewWindowRequested(
@@ -251,13 +257,12 @@ void WebView2Widget::initialize()
 														  {QStringLiteral("command"), request->command},
 														  {QStringLiteral("args"), request->args}};
 											QTimer::singleShot(0, guard.data(), [guard, message] {
-												if (!guard || !guard->impl->loaded) return;
-												if (message.value("command") == QStringLiteral("ui.present")) {
-													guard->postMessage({{"version", 1}, {"id", message.value("id")}, {"ok", true}, {"result", QJsonObject{}}});
-													guard->presentFrame();
+												if (!guard) return;
+												if (!guard->impl->loaded) {
+													guard->impl->queuedRequests.append(message);
 													return;
 												}
-												emit guard->messageReceived(message);
+												guard->deliverRequest(message);
 											});
 										}
 										return S_OK;
@@ -282,6 +287,14 @@ void WebView2Widget::initialize()
 											if (guard) {
 												guard->impl->trace("ready");
 												emit guard->ready();
+												if (guard && guard->impl->loaded) {
+													QVector<QJsonObject> queued;
+													queued.swap(guard->impl->queuedRequests);
+													for (const auto &message : queued) {
+														if (!guard || !guard->impl->loaded) break;
+													guard->deliverRequest(message);
+													}
+												}
 											}
 											if (guard) guard->impl->trace("ready-handlers-returned");
 											if (guard)
@@ -322,6 +335,16 @@ void WebView2Widget::postMessage(const QJsonObject &message)
 	const HRESULT result = impl->webview->PostWebMessageAsJson(json.c_str());
 	if (FAILED(result))
 		reportFailure(QStringLiteral("Cannot deliver WebView2 message"), result);
+}
+
+void WebView2Widget::deliverRequest(const QJsonObject &message)
+{
+	if (message.value("command") == QStringLiteral("ui.present")) {
+		postMessage({{"version", 1}, {"id", message.value("id")}, {"ok", true}, {"result", QJsonObject{}}});
+		presentFrame();
+	} else {
+		emit messageReceived(message);
+	}
 }
 
 void WebView2Widget::presentFrame()

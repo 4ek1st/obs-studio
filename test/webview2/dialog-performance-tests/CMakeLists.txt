@@ -44,3 +44,8 @@ add_executable(drop-origin-test ../drop-test.cpp "${root}/frontend/webview2/Exte
 target_include_directories(drop-origin-test PRIVATE "${root}/frontend/webview2")
 target_link_libraries(drop-origin-test PRIVATE Qt6::Widgets)
 add_test(NAME drop-origin COMMAND drop-origin-test)
+add_executable(dock-group-drag-test ../dock-group-drag-test.cpp
+  "${root}/frontend/webview2/FloatingDockGroupChrome.cpp"
+  "${root}/frontend/webview2/FloatingDockGroupChrome.hpp")
+target_link_libraries(dock-group-drag-test PRIVATE Qt6::Widgets)
+add_test(NAME dock-group-drag COMMAND dock-group-drag-test)

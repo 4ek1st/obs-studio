@@ -21,6 +21,8 @@ target_sources(
     webview2/WebView2Drop.hpp
     webview2/WebView2Widget.cpp
     webview2/WebView2Widget.hpp
+    webview2/FloatingDockGroupChrome.cpp
+    webview2/FloatingDockGroupChrome.hpp
 )
 target_link_libraries(obs-studio PRIVATE OBS::WebView2)
 set_property(SOURCE widgets/OBSBasic.cpp widgets/OBSBasic_Scenes.cpp components/SourceTree.cpp
