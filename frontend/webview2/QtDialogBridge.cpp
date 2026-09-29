@@ -1,7 +1,9 @@
 #include "QtDialogBridge.hpp"
 #include "WebView2Widget.hpp"
 
+#ifndef OBS_WEBVIEW2_STANDALONE_TEST
 #include <OBSApp.hpp>
+#endif
 
 #include <QAbstractButton>
 #include <QAbstractItemView>
@@ -68,6 +70,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace {
@@ -194,6 +197,7 @@ bool isStandardContainer(QWidget *widget)
 
 namespace OBSWeb {
 struct QtDialogBridge::Impl {
+	QtDialogBridge *owner = nullptr;
 	QPointer<QWidget> dialog;
 	quint64 sequence = 0;
 	QHash<QString, QPointer<QWidget>> widgets;
@@ -201,31 +205,63 @@ struct QtDialogBridge::Impl {
 	QHash<QString, QPersistentModelIndex> indexes;
 	QHash<QPersistentModelIndex, QString> indexIds;
 	QHash<qint64, QString> icons;
-	struct Raster { QSize size; qreal dpr; QByteArray fingerprint; QString uri; };
-	// Compare freshly styled pixels, then reuse PNG encoding. This also catches
-	// inherited QSS and dynamic-property changes without guessing a style cache key.
-	// Keep fingerprints rather than raw bitmaps: several nested Settings panels
-	// otherwise exhaust the cache and re-encode every image on every poll.
+	struct Raster {
+		QSize size;
+		QRect paintRect;
+		qreal dpr;
+		quint64 revision;
+		quint64 styleRevision;
+		std::array<int, 7> paintState;
+		QByteArray fingerprint;
+		QString uri;
+	};
+	// Native paint and style events invalidate the affected raster. Unchanged
+	// settings panels can then reuse their encoded decoration without repainting
+	// the same pixels on every state poll.
 	QCache<QString, Raster> rasters{8 * 1024 * 1024};
+	QHash<QWidget *, quint64> rasterRevisions;
+	quint64 styleRevision = 0;
+	bool rasterizing = false;
 
-	template<typename Paint> QString raster(QWidget *widget, const QString &part, Paint paint, QRect paintRect = {})
+	template<typename Paint> QString raster(QWidget *widget, const QString &part, Paint paint, QRect paintRect = {},
+						 std::array<int, 7> paintState = {})
 	{
 		if (paintRect.isEmpty()) paintRect = widget->rect();
 		const auto dpr = widget->devicePixelRatioF();
-		QImage pixels(paintRect.size() * dpr, QImage::Format_ARGB32_Premultiplied);
+		const auto pixelSize = paintRect.size() * dpr;
+		const auto key = identify(widget) + QLatin1Char(':') + part;
+		const auto revision = rasterRevisions.value(widget);
+		if (auto *cached = rasters.object(key); cached && cached->size == pixelSize && cached->paintRect == paintRect &&
+		    cached->dpr == dpr && cached->revision == revision && cached->styleRevision == styleRevision &&
+		    cached->paintState == paintState)
+			return cached->uri;
+		QImage pixels(pixelSize, QImage::Format_ARGB32_Premultiplied);
 		if (pixels.isNull()) return {};
 		pixels.setDevicePixelRatio(dpr);
 		pixels.fill(Qt::transparent);
-		{ QPainter painter(&pixels); painter.translate(-paintRect.topLeft()); paint(painter); }
+		{
+			QPainter painter(&pixels);
+			painter.translate(-paintRect.topLeft());
+			const bool previous = rasterizing;
+			rasterizing = true;
+			paint(painter);
+			rasterizing = previous;
+		}
 		const auto fingerprint = QCryptographicHash::hash(
 			QByteArrayView(reinterpret_cast<const char *>(pixels.constBits()), pixels.sizeInBytes()), QCryptographicHash::Sha256);
-		const auto key = identify(widget) + QLatin1Char(':') + part;
 		if (auto *cached = rasters.object(key); cached && cached->size == pixels.size() && cached->dpr == dpr &&
-		    cached->fingerprint == fingerprint) return cached->uri;
+		    cached->fingerprint == fingerprint) {
+			cached->paintRect = paintRect;
+			cached->revision = revision;
+			cached->styleRevision = styleRevision;
+			cached->paintState = paintState;
+			return cached->uri;
+		}
 		QByteArray bytes;
 		QBuffer buffer(&bytes); buffer.open(QIODevice::WriteOnly); pixels.save(&buffer, "PNG");
 		const auto uri = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(bytes.toBase64());
-		rasters.insert(key, new Raster{pixels.size(), dpr, fingerprint, uri}, sizeof(Raster) + fingerprint.size() + uri.size() * sizeof(QChar));
+		rasters.insert(key, new Raster{pixels.size(), paintRect, dpr, revision, styleRevision, paintState, fingerprint, uri},
+		               sizeof(Raster) + fingerprint.size() + uri.size() * sizeof(QChar));
 		return uri;
 	}
 
@@ -238,6 +274,8 @@ struct QtDialogBridge::Impl {
 		option.sliderPosition = scroll->sliderPosition(); option.sliderValue = scroll->value();
 		option.singleStep = scroll->singleStep(); option.pageStep = scroll->pageStep();
 		option.upsideDown = scroll->invertedAppearance();
+		const std::array<int, 7> paintState{option.minimum, option.maximum, option.pageStep, option.sliderPosition,
+						option.sliderValue, int(option.upsideDown), int(option.orientation)};
 		option.subControls = QStyle::SC_All;
 		option.state &= ~(QStyle::State_MouseOver | QStyle::State_Sunken | QStyle::State_Horizontal);
 		if (scroll->orientation() == Qt::Horizontal) option.state |= QStyle::State_Horizontal;
@@ -264,7 +302,7 @@ struct QtDialogBridge::Impl {
 			}
 			data.insert(QString::fromLatin1(state), raster(scroll, QString::fromLatin1(state), [&](QPainter &painter) {
 				style->drawComplexControl(QStyle::CC_ScrollBar, &painted, &painter, scroll);
-			}));
+			}, {}, paintState));
 		}
 		return data;
 	}
@@ -339,6 +377,7 @@ struct QtDialogBridge::Impl {
 		const auto id = QString::number(++sequence);
 		widgetIds.insert(widget, id);
 		widgets.insert(id, widget);
+		widget->installEventFilter(owner);
 		return id;
 	}
 
@@ -375,6 +414,9 @@ struct QtDialogBridge::Impl {
 		}
 		for (auto it = widgetIds.begin(); it != widgetIds.end();) {
 			if (!widgets.contains(it.value())) it = widgetIds.erase(it); else ++it;
+		}
+		for (auto it = rasterRevisions.begin(); it != rasterRevisions.end();) {
+			if (!widgetIds.contains(it.key())) it = rasterRevisions.erase(it); else ++it;
 		}
 		// QPersistentModelIndex's hash changes after model insertions. Rebuild its reverse map.
 		indexIds.clear();
@@ -637,10 +679,47 @@ struct QtDialogBridge::Impl {
 
 QtDialogBridge::QtDialogBridge(QWidget *dialog, QObject *parent) : QObject(parent), impl(std::make_unique<Impl>())
 {
+	impl->owner = this;
 	impl->dialog = dialog;
 }
 
 QtDialogBridge::~QtDialogBridge() = default;
+
+bool QtDialogBridge::eventFilter(QObject *watched, QEvent *event)
+{
+	// Rendering a cached native decoration can itself polish a Qt style.
+	// Those nested events are caused by this snapshot, not by a UI change.
+	if (impl->rasterizing) return QObject::eventFilter(watched, event);
+	auto *widget = qobject_cast<QWidget *>(watched);
+	if (widget && impl->widgetIds.contains(widget)) {
+		switch (event->type()) {
+		case QEvent::StyleChange:
+		case QEvent::PaletteChange:
+		case QEvent::FontChange:
+		case QEvent::DynamicPropertyChange:
+		case QEvent::ParentChange:
+			++impl->styleRevision;
+			break;
+		case QEvent::Paint:
+			++impl->rasterRevisions[widget];
+			break;
+		case QEvent::UpdateRequest:
+		case QEvent::Resize:
+		case QEvent::Move:
+		case QEvent::Show:
+		case QEvent::Hide:
+		case QEvent::EnabledChange:
+		case QEvent::FocusIn:
+		case QEvent::FocusOut:
+		case QEvent::ContentsRectChange:
+			++impl->rasterRevisions[widget];
+			break;
+		default:
+			break;
+		}
+	}
+	return QObject::eventFilter(watched, event);
+}
 
 QJsonObject QtDialogBridge::snapshot()
 {
@@ -660,8 +739,16 @@ QJsonObject QtDialogBridge::snapshot()
 	QJsonObject labels;
 	for (const auto *key : {"WebView2.Dialog", "WebView2.Dialog.Scroll", "WebView2.Dialog.Expand",
 				"WebView2.Dialog.Collapse", "WebView2.Dialog.OpenMenu", "WebView2.Dialog.UpdateFailed"})
+	#ifndef OBS_WEBVIEW2_STANDALONE_TEST
 		labels.insert(QString::fromLatin1(key), QTStr(key));
+	#else
+		labels.insert(QString::fromLatin1(key), QString::fromLatin1(key));
+	#endif
+	#ifndef OBS_WEBVIEW2_STANDALONE_TEST
 	return {{"title", title}, {"locale", QString::fromUtf8(App()->GetLocale())}, {"labels", labels},
+	#else
+	return {{"title", title}, {"locale", QStringLiteral("en-US")}, {"labels", labels},
+	#endif
 		{"width", impl->dialog->width()}, {"height", impl->dialog->height()},
 		{"focus", impl->widgetIds.value(impl->dialog->focusWidget())},
 		{"acceptDrops", impl->dialog->acceptDrops()},
@@ -699,13 +786,33 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 			widget = combo->lineEdit();
 	}
 	if (command == "dialog.click") {
-		if (auto *button = qobject_cast<QAbstractButton *>(widget)) { button->click(); return true; }
+		if (auto *button = qobject_cast<QAbstractButton *>(widget)) {
+			const QPointer<QAbstractButton> target(button);
+			QTimer::singleShot(0, button, [target] {
+				if (target && target->isVisible() && target->isEnabled()) target->click();
+			});
+			return true;
+		}
 		if (auto *group = qobject_cast<QGroupBox *>(widget); group && group->isCheckable()) {
-			group->setChecked(!group->isChecked()); if (widget) emit group->clicked(group->isChecked()); return true;
+			const QPointer<QGroupBox> target(group);
+			QTimer::singleShot(0, group, [target] {
+				if (!target || !target->isVisible() || !target->isEnabled()) return;
+				target->setChecked(!target->isChecked());
+				if (target) emit target->clicked(target->isChecked());
+			});
+			return true;
 		}
 	} else if (command == "dialog.menu") {
-		if (auto *tool = qobject_cast<QToolButton *>(widget); tool && tool->menu()) { tool->showMenu(); return true; }
-		if (auto *button = qobject_cast<QPushButton *>(widget); button && button->menu()) { button->showMenu(); return true; }
+		if (auto *tool = qobject_cast<QToolButton *>(widget); tool && tool->menu()) {
+			const QPointer<QToolButton> target(tool);
+			QTimer::singleShot(0, tool, [target] { if (target && target->isVisible() && target->isEnabled()) target->showMenu(); });
+			return true;
+		}
+		if (auto *button = qobject_cast<QPushButton *>(widget); button && button->menu()) {
+			const QPointer<QPushButton> target(button);
+			QTimer::singleShot(0, button, [target] { if (target && target->isVisible() && target->isEnabled()) target->showMenu(); });
+			return true;
+		}
 		return reject("Control has no menu");
 	} else if (command == "dialog.input") {
 		const auto value = args.value("value");
@@ -828,14 +935,27 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 			return view->model()->setData(index, args.value("value").toString(), Qt::EditRole);
 		}
 		if (action != "select" && action != "activate" && action != "context") return reject("Unknown item action");
+		if (action == "activate" || action == "context") {
+			const QPointer<QAbstractItemView> target(view);
+			const QPersistentModelIndex persistent(index);
+			const auto keys = modifiers(args);
+			QTimer::singleShot(0, view, [target, persistent, action, keys] {
+				if (!target || !target->isVisible() || !target->isEnabled() || !persistent.isValid() ||
+				    persistent.model() != target->model()) return;
+				target->scrollTo(persistent);
+				const auto point = target->visualRect(persistent).center();
+				if (action == "context") {
+					mouseClick(target->viewport(), point, keys, false, Qt::RightButton);
+					if (!target) return;
+					QContextMenuEvent event(QContextMenuEvent::Mouse, point, target->viewport()->mapToGlobal(point), keys);
+					QApplication::sendEvent(target->viewport(), &event);
+				} else mouseClick(target->viewport(), point, keys, true);
+			});
+			return true;
+		}
 		view->scrollTo(index);
 		const auto point = view->visualRect(index).center();
-		if (action == "context") {
-			mouseClick(view->viewport(), point, modifiers(args), false, Qt::RightButton);
-			if (!widget) return true;
-			QContextMenuEvent event(QContextMenuEvent::Mouse, point, view->viewport()->mapToGlobal(point), modifiers(args));
-			QApplication::sendEvent(view->viewport(), &event);
-		} else mouseClick(view->viewport(), point, modifiers(args), action == "activate");
+		mouseClick(view->viewport(), point, modifiers(args), false);
 		return true;
 	} else if (command == "dialog.scroll") {
 		auto *area = qobject_cast<QAbstractScrollArea *>(widget);
@@ -855,9 +975,15 @@ bool QtDialogBridge::execute(const QString &command, const QJsonObject &args, QS
 			Qt::NoButton, modifiers(args), Qt::NoScrollPhase, false);
 		QApplication::sendEvent(area->viewport(), &event); return true;
 	} else if (command == "dialog.context") {
-		const auto point = widget->rect().center();
-		QContextMenuEvent event(QContextMenuEvent::Mouse, point, widget->mapToGlobal(point), modifiers(args));
-		QApplication::sendEvent(widget, &event); return true;
+		const QPointer<QWidget> target(widget);
+		const auto keys = modifiers(args);
+		QTimer::singleShot(0, widget, [target, keys] {
+			if (!target || !target->isVisible() || !target->isEnabled()) return;
+			const auto point = target->rect().center();
+			QContextMenuEvent event(QContextMenuEvent::Mouse, point, target->mapToGlobal(point), keys);
+			QApplication::sendEvent(target, &event);
+		});
+		return true;
 	} else if (command == "dialog.header") {
 		QHeaderView *header = nullptr;
 		if (auto *tree = qobject_cast<QTreeView *>(widget)) header = tree->header();

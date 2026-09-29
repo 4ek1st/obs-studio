@@ -42,6 +42,7 @@
 #include <qt-wrappers.hpp>
 
 #include "SettingsSearchController.hpp"
+#include <QTimer>
 
 #include <QCompleter>
 #include <QStandardItemModel>
@@ -942,6 +943,11 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	ui->advancedMsg2->setVisible(false);
 
 	new OBSSettingsSearch::Controller(this, ui.get());
+	hotkeySearchTimer = new QTimer(this);
+	hotkeySearchTimer->setSingleShot(true);
+	hotkeySearchTimer->setInterval(75);
+	connect(hotkeySearchTimer, &QTimer::timeout, this,
+		[this] { SearchHotkeys(ui->hotkeyFilterSearch->text(), ui->hotkeyFilterInput->key); });
 }
 
 OBSBasicSettings::~OBSBasicSettings()
@@ -2787,6 +2793,7 @@ static inline void AddHotkeys(QFormLayout &layout, Func &&getName,
 
 void OBSBasicSettings::LoadHotkeySettings(obs_hotkey_id ignoreKey)
 {
+	if (hotkeySearchTimer) hotkeySearchTimer->stop();
 	hotkeys.clear();
 	if (ui->hotkeyFormLayout->rowCount() > 0) {
 		QLayoutItem *forDeletion = ui->hotkeyFormLayout->takeAt(0);
@@ -4506,8 +4513,6 @@ void OBSBasicSettings::SearchHotkeys(const QString &text, obs_key_combination_t 
 	}
 
 	std::vector<obs_key_combination_t> combos;
-	bool showHotkey;
-	ui->hotkeyScrollArea->ensureVisible(0, 0);
 
 	QLayoutItem *hotkeysItem = ui->hotkeyFormLayout->itemAt(0);
 	QWidget *hotkeys = hotkeysItem->widget();
@@ -4516,11 +4521,15 @@ void OBSBasicSettings::SearchHotkeys(const QString &text, obs_key_combination_t 
 	}
 
 	QFormLayout *hotkeysLayout = qobject_cast<QFormLayout *>(hotkeys->layout());
-	hotkeysLayout->setEnabled(false);
-
-	QString needle = text.toLower();
+	const QString needle = text.toLower();
+	const bool filtering = !needle.isEmpty() || !obs_key_combination_is_empty(filterCombo);
+	std::vector<bool> visible(size_t(hotkeysLayout->rowCount()), !filtering);
+	int heading = -1;
 
 	for (int i = 0; i < hotkeysLayout->rowCount(); i++) {
+		if (auto *span = hotkeysLayout->itemAt(i, QFormLayout::SpanningRole);
+		    span && qobject_cast<QLabel *>(span->widget()))
+			heading = i;
 		auto label = hotkeysLayout->itemAt(i, QFormLayout::LabelRole);
 		if (!label) {
 			continue;
@@ -4531,9 +4540,9 @@ void OBSBasicSettings::SearchHotkeys(const QString &text, obs_key_combination_t 
 			continue;
 		}
 
-		QString fullname = item->property("fullName").value<QString>();
+		const QString fullname = item->property("fullName").value<QString>();
 
-		showHotkey = needle.isEmpty() || fullname.toLower().contains(needle);
+		bool showHotkey = needle.isEmpty() || fullname.toLower().contains(needle);
 
 		if (showHotkey && !obs_key_combination_is_empty(filterCombo)) {
 			showHotkey = false;
@@ -4547,14 +4556,20 @@ void OBSBasicSettings::SearchHotkeys(const QString &text, obs_key_combination_t 
 			}
 		}
 
-		label->widget()->setVisible(showHotkey);
-
-		auto field = hotkeysLayout->itemAt(i, QFormLayout::FieldRole);
-		if (field) {
-			field->widget()->setVisible(showHotkey);
-		}
+		visible[size_t(i)] = showHotkey;
+		if (showHotkey && heading >= 0) visible[size_t(heading)] = true;
 	}
+	ui->hotkeyScrollArea->setUpdatesEnabled(false);
+	hotkeysLayout->setEnabled(false);
+	for (int i = 0; i < hotkeysLayout->rowCount(); ++i)
+		if (hotkeysLayout->isRowVisible(i) != visible[size_t(i)]) hotkeysLayout->setRowVisible(i, visible[size_t(i)]);
 	hotkeysLayout->setEnabled(true);
+	hotkeysLayout->activate();
+	ui->hotkeyFormLayout->activate();
+	ui->hotkeyScrollArea->widget()->layout()->activate();
+	ui->hotkeyScrollArea->widget()->adjustSize();
+	ui->hotkeyScrollArea->verticalScrollBar()->setValue(0);
+	ui->hotkeyScrollArea->setUpdatesEnabled(true);
 }
 
 void OBSBasicSettings::on_hotkeyFilterReset_clicked()
@@ -4565,11 +4580,13 @@ void OBSBasicSettings::on_hotkeyFilterReset_clicked()
 
 void OBSBasicSettings::on_hotkeyFilterSearch_textChanged(const QString text)
 {
-	SearchHotkeys(text, ui->hotkeyFilterInput->key);
+	Q_UNUSED(text);
+	hotkeySearchTimer->start();
 }
 
 void OBSBasicSettings::on_hotkeyFilterInput_KeyChanged(obs_key_combination_t combo)
 {
+	hotkeySearchTimer->stop();
 	SearchHotkeys(ui->hotkeyFilterSearch->text(), combo);
 }
 

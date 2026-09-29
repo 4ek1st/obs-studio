@@ -5,6 +5,7 @@
 #include <memory>
 
 class QWidget;
+class QEvent;
 
 namespace OBSWeb {
 struct ExternalDropData;
@@ -19,6 +20,7 @@ public:
 	bool drop(const ExternalDropData &data, QString &error);
 
 private:
+	bool eventFilter(QObject *watched, QEvent *event) override;
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 };

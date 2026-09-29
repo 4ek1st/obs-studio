@@ -10,10 +10,22 @@
 using Microsoft::WRL::ComPtr;
 static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+	static POINT target{};
 	if (message == WM_APP + 10) {
+		target = {int(wparam), int(lparam)};
 		NotifyWinEvent(EVENT_SYSTEM_MOVESIZESTART, window, OBJID_WINDOW, CHILDID_SELF);
-		SetWindowPos(window, nullptr, int(wparam), int(lparam), 0, 0,
+		SetTimer(window, 1, 120, nullptr);
+		return 0;
+	}
+	if (message == WM_TIMER && wparam == 1) {
+		KillTimer(window, 1);
+		SetWindowPos(window, nullptr, target.x, target.y, 0, 0,
 			     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+		SetTimer(window, 2, 120, nullptr);
+		return 0;
+	}
+	if (message == WM_TIMER && wparam == 2) {
+		KillTimer(window, 2);
 		NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND, window, OBJID_WINDOW, CHILDID_SELF);
 		return 0;
 	}

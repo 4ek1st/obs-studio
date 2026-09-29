@@ -46,6 +46,16 @@ void runIntegrationChecks()
 			localeReport.write(QJsonDocument(QJsonObject{{"locale", localizedState.value("locale")},
 				{"labels", localizedLabels}}).toJson());
 	}
+	if (QCoreApplication::arguments().contains(QStringLiteral("--webview2-hotkey-search-test"))) {
+		RunHotkeySearchChecks(static_cast<OBSBasic *>(main), check, [this, fixture] {
+			QFile report(QDir(qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS")).filePath("hotkey-search-checks.json"));
+			if (report.open(QIODevice::WriteOnly)) report.write(QJsonDocument(fixture->checks).toJson());
+			config_set_bool(obs_frontend_get_user_config(), "General", "ConfirmOnExit", false);
+			const int holdMs = qEnvironmentVariableIntValue("OBS_WEBVIEW2_HOLD_SETTINGS_MS");
+			QTimer::singleShot(holdMs > 0 ? std::min(holdMs, 120000) : 200, main, &QWidget::close);
+		});
+		return;
+	}
 	if (QCoreApplication::arguments().contains(QStringLiteral("--webview2-dock-tabs-test"))) {
 		runDockTabsChecks(check, [this, fixture, check] {
 			runDockTabDetachChecks(check, [this, fixture] {

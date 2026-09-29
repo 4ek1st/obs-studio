@@ -32,6 +32,7 @@ class Auth;
 class OBSBasic;
 class OBSHotkeyWidget;
 class OBSPropertiesView;
+class QTimer;
 struct FFmpegFormat;
 struct OBSTheme;
 
@@ -75,6 +76,7 @@ private:
 	int channelIndex = 0;
 	bool llBufferingEnabled = false;
 	bool hotkeysLoaded = false;
+	QTimer *hotkeySearchTimer = nullptr;
 
 	int lastSimpleRecQualityIdx = 0;
 	int lastServiceIdx = -1;
