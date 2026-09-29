@@ -105,10 +105,13 @@ int main(int argc, char **argv)
 	real.setProperty("webview2NativeDocking", true);
 	QDockWidget first(QStringLiteral("First"), &real);
 	QDockWidget second(QStringLiteral("Second"), &real);
+	QDockWidget target(QStringLiteral("Target"), &real);
 	first.setObjectName(QStringLiteral("first"));
 	second.setObjectName(QStringLiteral("second"));
+	target.setObjectName(QStringLiteral("target"));
 	real.addDockWidget(Qt::LeftDockWidgetArea, &first);
 	real.addDockWidget(Qt::LeftDockWidgetArea, &second);
+	real.addDockWidget(Qt::RightDockWidgetArea, &target);
 	real.tabifyDockWidget(&first, &second);
 	real.show();
 	app.processEvents();
@@ -162,6 +165,37 @@ int main(int argc, char **argv)
 	    !second.parentWidget()->inherits("QDockWidgetGroupWindow") ||
 	    first.parentWidget() != second.parentWidget()) {
 		std::cerr << "FAIL: blank tab drag did not release a floating group containing both panels\n";
+		return 1;
+	}
+	QTabBar *floatingTabs = nullptr;
+	for (auto *bar : second.parentWidget()->findChildren<QTabBar *>()) {
+		if (bar->isVisible() && bar->count() == 2) { floatingTabs = bar; break; }
+	}
+	if (!floatingTabs) {
+		std::cerr << "FAIL: floating group has no tab strip\n";
+		return 1;
+	}
+	const QPoint floatingBlank(floatingTabs->width() - 10, floatingTabs->height() / 2);
+	if (floatingTabs->tabAt(floatingBlank) >= 0) {
+		std::cerr << "FAIL: floating group has no blank tab strip\n";
+		return 1;
+	}
+	const QPoint dockTarget = target.mapToGlobal(target.rect().center());
+	sendMouse(floatingTabs, QEvent::MouseButtonPress, Qt::LeftButton, Qt::LeftButton, floatingBlank);
+	sendMouse(floatingTabs, QEvent::MouseMove, Qt::NoButton, Qt::LeftButton,
+	          floatingTabs->mapFromGlobal(dockTarget));
+	QWidget *releaseReceiver = QWidget::mouseGrabber();
+	if (!releaseReceiver) releaseReceiver = floatingTabs;
+	sendMouse(releaseReceiver, QEvent::MouseButtonRelease, Qt::LeftButton, Qt::NoButton,
+	          releaseReceiver->mapFromGlobal(dockTarget));
+	app.processEvents();
+	QEventLoop redockSettle;
+	QTimer::singleShot(500, &redockSettle, &QEventLoop::quit);
+	redockSettle.exec();
+	if (first.parentWidget() != &real || second.parentWidget() != &real ||
+	    !real.tabifiedDockWidgets(&first).contains(&second) ||
+	    real.dockWidgetArea(&first) != Qt::RightDockWidgetArea) {
+		std::cerr << "FAIL: floating group dropped on a dock did not insert both tabs into that area\n";
 		return 1;
 	}
 
@@ -250,12 +284,15 @@ int main(int argc, char **argv)
 		physical.setGeometry(120, 120, 800, 500);
 		QDockWidget a(QStringLiteral("Physical A"), &physical);
 		QDockWidget b(QStringLiteral("Physical B"), &physical);
+		QDockWidget target(QStringLiteral("Physical target"), &physical);
 		a.setObjectName(QStringLiteral("physicalA"));
 		b.setObjectName(QStringLiteral("physicalB"));
+		target.setObjectName(QStringLiteral("physicalTarget"));
 		auto *physicalTitle = new IgnoringTitleBar(&b);
 		b.setTitleBarWidget(physicalTitle);
 		physical.addDockWidget(Qt::LeftDockWidgetArea, &a);
 		physical.addDockWidget(Qt::LeftDockWidgetArea, &b);
+		physical.addDockWidget(Qt::RightDockWidgetArea, &target);
 		physical.tabifyDockWidget(&a, &b);
 		physical.show();
 		physical.raise();
@@ -284,7 +321,7 @@ int main(int argc, char **argv)
 			SendInput(1, &input, sizeof(input));
 		};
 		QTimer::singleShot(60, &physicalLoop, [&] { QCursor::setPos(start); sendButton(MOUSEEVENTF_LEFTDOWN); });
-		QTimer::singleShot(160, &physicalLoop, [&] { QCursor::setPos(start + QPoint(200, 100)); });
+		QTimer::singleShot(160, &physicalLoop, [&] { QCursor::setPos(start + QPoint(100, 600)); });
 		QTimer::singleShot(260, &physicalLoop, [&] { sendButton(MOUSEEVENTF_LEFTUP); });
 		QTimer::singleShot(500, &physicalLoop, &QEventLoop::quit);
 		physicalLoop.exec();
@@ -305,26 +342,55 @@ int main(int argc, char **argv)
 			std::cerr << "FAIL: physical title strip is covered by another window\n";
 			return 1;
 		}
-		const QPoint dockTarget = physical.mapToGlobal(QPoint(physical.width() / 2, physical.height() / 2));
+		const QPoint outside = physical.mapToGlobal(QPoint(physical.width() + 180,
+		                                                  physical.height() / 2));
 		const QPoint groupBefore = b.parentWidget()->pos();
 		QEventLoop titleLoop;
 		QTimer::singleShot(60, &titleLoop, [&] { QCursor::setPos(titleStart); sendButton(MOUSEEVENTF_LEFTDOWN); });
-		QTimer::singleShot(160, &titleLoop, [&] { QCursor::setPos(dockTarget); });
+		QTimer::singleShot(160, &titleLoop, [&] { QCursor::setPos(outside); });
 		QTimer::singleShot(260, &titleLoop, [&] { sendButton(MOUSEEVENTF_LEFTUP); });
 		QTimer::singleShot(500, &titleLoop, &QEventLoop::quit);
 		titleLoop.exec();
 		QCursor::setPos(oldCursor);
-		const bool returnedTogether = b.parentWidget() == &physical && a.parentWidget() == &physical &&
-		                              physical.tabifiedDockWidgets(&a).contains(&b);
 		const bool floatingMoved = b.parentWidget() &&
 		                           b.parentWidget()->inherits("QDockWidgetGroupWindow") &&
 		                           a.parentWidget() == b.parentWidget() &&
 		                           b.parentWidget()->pos() != groupBefore;
-		if (QWidget::mouseGrabber() || (!returnedTogether && !floatingMoved)) {
-			std::cerr << "FAIL: physical title drag neither moved nor docked the group on release\n";
+		if (QWidget::mouseGrabber() || !floatingMoved) {
+			std::cerr << "FAIL: physical title drag did not move and release the group\n";
 			return 1;
 		}
-		std::cout << "PASS: real mouse input detaches a group from blank space and releases its title drag\n";
+		QTabBar *floatingTabs = nullptr;
+		for (auto *bar : b.parentWidget()->findChildren<QTabBar *>()) {
+			if (bar->isVisible() && bar->count() == 2) { floatingTabs = bar; break; }
+		}
+		if (!floatingTabs) {
+			std::cerr << "FAIL: physical floating group has no tab strip\n";
+			return 1;
+		}
+		const QPoint floatingStart = floatingTabs->mapToGlobal(
+			QPoint(floatingTabs->width() - 10, floatingTabs->height() / 2));
+		if (floatingTabs->tabAt(floatingTabs->mapFromGlobal(floatingStart)) >= 0 ||
+		    QApplication::widgetAt(floatingStart) != floatingTabs) {
+			std::cerr << "FAIL: physical floating group's blank strip is unavailable\n";
+			return 1;
+		}
+		const QPoint targetPoint = target.mapToGlobal(target.rect().center());
+		QEventLoop redockLoop;
+		QTimer::singleShot(60, &redockLoop, [&] { QCursor::setPos(floatingStart); sendButton(MOUSEEVENTF_LEFTDOWN); });
+		QTimer::singleShot(160, &redockLoop, [&] { QCursor::setPos(targetPoint); });
+		QTimer::singleShot(260, &redockLoop, [&] { sendButton(MOUSEEVENTF_LEFTUP); });
+		QTimer::singleShot(850, &redockLoop, &QEventLoop::quit);
+		redockLoop.exec();
+		QCursor::setPos(oldCursor);
+		if (QWidget::mouseGrabber() || a.parentWidget() != &physical ||
+		    b.parentWidget() != &physical ||
+		    !physical.tabifiedDockWidgets(&a).contains(&b) ||
+		    physical.dockWidgetArea(&a) != Qt::RightDockWidgetArea) {
+			std::cerr << "FAIL: physical blank-tab drag did not dock the floating group together\n";
+			return 1;
+		}
+		std::cout << "PASS: real mouse input detaches, moves, and docks the whole group from blank tabs\n";
 	}
 	std::cout << "PASS: blank docked tab strip drags both panels and missed title release recovers\n";
 	return 0;

@@ -7,6 +7,7 @@
 #include <QDockWidget>
 #include <QMainWindow>
 #include <QMouseEvent>
+#include <QStyle>
 #include <QTabBar>
 #include <QWidget>
 #include <algorithm>
@@ -63,14 +64,32 @@ bool FloatingDockGroupChrome::blankHeader(QWidget *group, QWidget *grip, const Q
 	return local.y() >= tabTop.y() - 4 && local.y() <= tabTop.y() + tabs->height() + 4;
 }
 
-void FloatingDockGroupChrome::finishMove()
+void FloatingDockGroupChrome::finishMove(const QPoint &global)
 {
+	const QPointer<QWidget> group = movingGroup;
 	const QPointer<QWidget> grip = movingGrip;
 	movingGroup = nullptr;
 	movingGrip = nullptr;
-	if (!grip) return;
-	grip->unsetCursor();
-	if (QWidget::mouseGrabber() == grip) grip->releaseMouse();
+	if (grip) {
+		grip->unsetCursor();
+		if (QWidget::mouseGrabber() == grip) grip->releaseMouse();
+	}
+	if (group && main)
+		sendGroupMouse(group, QEvent::NonClientAreaMouseMove, global,
+		               group->mapFromGlobal(global), Qt::NoButton,
+		               Qt::NoButton, Qt::NoModifier);
+	if (!forwardedDock && !guardedDock) releaseWatchdog.stop();
+}
+
+void FloatingDockGroupChrome::sendGroupMouse(QWidget *group, QEvent::Type type, const QPoint &global,
+	                                         const QPoint &local, Qt::MouseButton button,
+	                                         Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers)
+{
+	if (!group) return;
+	QMouseEvent forwarded(type, QPointF(local), QPointF(global), button, buttons, modifiers);
+	dispatchingForwardedEvent = true;
+	QApplication::sendEvent(group, &forwarded);
+	dispatchingForwardedEvent = false;
 }
 
 QDockWidget *FloatingDockGroupChrome::activeDockForTabs(QTabBar *tabs) const
@@ -124,7 +143,7 @@ void FloatingDockGroupChrome::finishForwardedDrag(bool release, const QPoint &ac
 
 void FloatingDockGroupChrome::checkMissedRelease()
 {
-	if (!forwardedDock && !guardedDock) {
+	if (!forwardedDock && !guardedDock && !movingGroup) {
 		releaseWatchdog.stop();
 		return;
 	}
@@ -136,7 +155,9 @@ void FloatingDockGroupChrome::checkMissedRelease()
 	// release event. The OS button state is authoritative after two quiet ticks.
 	if (++releasedTicks < 2) return;
 	const QPoint cursor = QCursor::pos();
-	if (forwardedDock) {
+	if (movingGroup) {
+		finishMove(cursor);
+	} else if (forwardedDock) {
 		finishForwardedDrag(true, cursor);
 	} else {
 		const QPointer<QDockWidget> dock = guardedDock;
@@ -162,7 +183,7 @@ FloatingDockGroupChrome::~FloatingDockGroupChrome()
 {
 	if (forwardedDock) finishForwardedDrag(true, QCursor::pos());
 	releaseWatchdog.stop();
-	finishMove();
+	finishMove(QCursor::pos());
 	qApp->removeEventFilter(this);
 	for (auto it = originalStyles.cbegin(); it != originalStyles.cend(); ++it)
 		it.key()->setStyleSheet(it.value());
@@ -265,14 +286,14 @@ bool FloatingDockGroupChrome::eventFilter(QObject *object, QEvent *event)
 			event->type() == QEvent::ApplicationDeactivate ||
 			(object == movingGrip && (event->type() == QEvent::UngrabMouse || event->type() == QEvent::Hide)) ||
 			(object == movingGroup && (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::Hide))) {
-			finishMove();
+			finishMove(QCursor::pos());
 			return false;
 		}
 		if (object == movingGrip && (event->type() == QEvent::MouseMove || event->type() == QEvent::MouseButtonRelease)) {
 			auto *mouse = static_cast<QMouseEvent *>(event);
 			if (event->type() == QEvent::MouseMove) {
 				if (!mouse->buttons().testFlag(Qt::LeftButton)) {
-					finishMove();
+					finishMove(mouse->globalPosition().toPoint());
 					return false;
 				}
 				movingGroup->move(pressWindow + mouse->globalPosition().toPoint() - pressGlobal);
@@ -280,7 +301,7 @@ bool FloatingDockGroupChrome::eventFilter(QObject *object, QEvent *event)
 				return true;
 			}
 			if (mouse->button() == Qt::LeftButton) {
-				finishMove();
+				finishMove(mouse->globalPosition().toPoint());
 				mouse->accept();
 				return true;
 			}
@@ -297,6 +318,19 @@ bool FloatingDockGroupChrome::eventFilter(QObject *object, QEvent *event)
 	if (movingGroup || mouse->button() != Qt::LeftButton || !blankHeader(group, grip, mouse)) return false;
 	auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
 	if (lock && lock->isChecked()) return false;
+	const QRect client = group->geometry();
+	const QRect frame = group->frameGeometry();
+	const int frameWidth = group->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, group);
+	if (client.width() <= 16 || frame.top() + frameWidth >= client.top()) return false;
+	const QPoint global = mouse->globalPosition().toPoint();
+	const QPoint titleGlobal(std::clamp(global.x(), client.left() + 8, client.right() - 8),
+	                         (frame.top() + frameWidth + client.top() - 1) / 2);
+	// Qt's group docking begins with a native title-bar press. The blank tab
+	// row is client area. Keep its actual local grip point so Qt's subsequent
+	// move events track the cursor while the global press passes the title check.
+	sendGroupMouse(group, QEvent::NonClientAreaMouseButtonPress, titleGlobal,
+	               group->mapFromGlobal(global), Qt::LeftButton, Qt::LeftButton,
+	               mouse->modifiers());
 	movingGroup = group;
 	movingGrip = grip;
 	pressGlobal = mouse->globalPosition().toPoint();
@@ -304,9 +338,11 @@ bool FloatingDockGroupChrome::eventFilter(QObject *object, QEvent *event)
 	grip->setCursor(Qt::ClosedHandCursor);
 	grip->grabMouse();
 	if (QWidget::mouseGrabber() != grip) {
-		finishMove();
+		finishMove(global);
 		return false;
 	}
+	releasedTicks = 0;
+	releaseWatchdog.start();
 	mouse->accept();
 	return true;
 }

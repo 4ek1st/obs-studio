@@ -41,7 +41,10 @@ class FloatingDockGroupChrome final : public QObject {
 	void styleGroup(QWidget *group);
 	QTabBar *tabsFor(QWidget *group) const;
 	bool blankHeader(QWidget *group, QWidget *grip, const QMouseEvent *mouse) const;
-	void finishMove();
+	void finishMove(const QPoint &global);
+	void sendGroupMouse(QWidget *group, QEvent::Type type, const QPoint &global,
+	                    const QPoint &local, Qt::MouseButton button,
+	                    Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers);
 	QDockWidget *activeDockForTabs(QTabBar *tabs) const;
 	void sendDockMouse(QDockWidget *dock, QEvent::Type type, const QPoint &global,
 	                   Qt::MouseButton button, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers);
