@@ -280,7 +280,6 @@ int main(int argc, char **argv)
 		physical.setProperty("webview2NativeDocking", true);
 		physical.setDockOptions(physical.dockOptions() | QMainWindow::GroupedDragging);
 		physical.setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
-		physical.setWindowFlag(Qt::WindowStaysOnTopHint);
 		physical.setGeometry(120, 120, 800, 500);
 		QDockWidget a(QStringLiteral("Physical A"), &physical);
 		QDockWidget b(QStringLiteral("Physical B"), &physical);
@@ -332,8 +331,6 @@ int main(int argc, char **argv)
 			std::cerr << "FAIL: physical blank-tab drag did not move and release the group\n";
 			return 1;
 		}
-		b.parentWidget()->setWindowFlag(Qt::WindowStaysOnTopHint);
-		b.parentWidget()->show();
 		b.parentWidget()->raise();
 		b.parentWidget()->activateWindow();
 		app.processEvents();

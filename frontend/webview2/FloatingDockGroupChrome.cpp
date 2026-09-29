@@ -321,7 +321,41 @@ bool FloatingDockGroupChrome::eventFilter(QObject *object, QEvent *event)
 	const QRect client = group->geometry();
 	const QRect frame = group->frameGeometry();
 	const int frameWidth = group->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, group);
-	if (client.width() <= 16 || frame.top() + frameWidth >= client.top()) return false;
+	if (client.width() <= 16) return false;
+	if (frame.top() + frameWidth >= client.top()) {
+		// Qt removes the native frame when a tab uses a custom title bar. In
+		// that case its dock widget handles dragging the entire tab group.
+		QDockWidget *dock = nullptr;
+		for (auto *candidate : group->findChildren<QDockWidget *>()) {
+			if (candidate->parentWidget() == group && !candidate->isHidden() &&
+			    candidate->titleBarWidget() &&
+			    candidate->features().testFlag(QDockWidget::DockWidgetMovable))
+				dock = candidate;
+		}
+		if (!dock) return false;
+		const QRect title = dock->titleBarWidget()->geometry();
+		const int left = title.left() + 2;
+		const int right = std::max(left, title.right() - 2);
+		const QPoint anchor(std::clamp(dock->mapFromGlobal(mouse->globalPosition().toPoint()).x(),
+		                               left, right), title.center().y());
+		forwardedDock = dock;
+		forwardedGrip = grip;
+		guardedDock = dock;
+		++guardSequence;
+		actualPress = mouse->globalPosition().toPoint();
+		virtualPress = dock->mapToGlobal(anchor);
+		releasedTicks = 0;
+		sendDockMouse(dock, QEvent::MouseButtonPress, virtualPress,
+		              Qt::LeftButton, Qt::LeftButton, mouse->modifiers());
+		grip->grabMouse();
+		if (QWidget::mouseGrabber() != grip) {
+			finishForwardedDrag(true, actualPress);
+			return false;
+		}
+		releaseWatchdog.start();
+		mouse->accept();
+		return true;
+	}
 	const QPoint global = mouse->globalPosition().toPoint();
 	const QPoint titleGlobal(std::clamp(global.x(), client.left() + 8, client.right() - 8),
 	                         (frame.top() + frameWidth + client.top() - 1) / 2);

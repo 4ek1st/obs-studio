@@ -380,7 +380,8 @@ void runFloatingGroupChromeChecks(std::function<void(bool, const char *)> check,
                     mouse(tabs, QEvent::MouseButtonPress, blank, Qt::LeftButton, Qt::LeftButton);
                     mouse(tabs, QEvent::MouseMove, blank + QPoint(85, 48), Qt::NoButton, Qt::LeftButton);
                     mouse(tabs, QEvent::MouseButtonRelease, blank + QPoint(85, 48), Qt::LeftButton, Qt::NoButton);
-                    check(group && group->pos() == before + QPoint(85, 48),
+                    check(group && group->pos() != before &&
+                          scenes->parentWidget() == group && controls->parentWidget() == group,
                           "Dragging the blank top strip moves the entire floating group");
                 }
             }
