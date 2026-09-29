@@ -485,10 +485,11 @@ function(_bundle_dependencies target)
 
     cmake_path(GET plugin PARENT_PATH plugin_path)
     cmake_path(GET plugin_path STEM plugin_stem)
+    cmake_path(GET plugin STEM plugin_name)
 
     list(APPEND plugin_stems ${plugin_stem})
 
-    if(plugin MATCHES "(.+d)\\.dll$" AND CMAKE_MATCH_COUNT EQUAL 1 AND NOT CMAKE_MATCH_1 IN_LIST debug_dll_exceptions)
+    if(plugin_name MATCHES ".+d$" AND NOT plugin_name IN_LIST debug_dll_exceptions)
       list(APPEND plugin_${plugin_stem}_debug ${plugin})
     else()
       list(APPEND plugin_${plugin_stem} ${plugin})

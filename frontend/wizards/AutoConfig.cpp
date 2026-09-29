@@ -12,6 +12,9 @@
 #include <utility/YoutubeApiWrappers.hpp>
 #endif
 #include <widgets/OBSBasic.hpp>
+#ifdef TWITCH_DEVICE_AUTH
+#include <oauth/TwitchAuth.hpp>
+#endif
 
 #include <qt-wrappers.hpp>
 
@@ -295,6 +298,13 @@ inline const char *AutoConfig::GetEncoderId(Encoder enc)
 void AutoConfig::SaveStreamSettings()
 {
 	OBSBasic *main = OBSBasic::Get();
+#ifdef TWITCH_DEVICE_AUTH
+	if (streamPage->twitchKeyInvalidated) key.clear();
+	if (auto twitch = dynamic_cast<TwitchAuth *>(streamPage->auth.get()); twitch && twitch->NeedsReconnect()) {
+		if (twitch->KeyInvalidated()) key.clear();
+		streamPage->auth.reset();
+	}
+#endif
 
 	/* ---------------------------------- */
 	/* save service                       */

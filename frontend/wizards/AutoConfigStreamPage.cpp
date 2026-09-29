@@ -3,6 +3,9 @@
 #include "ui_AutoConfigStreamPage.h"
 
 #include <oauth/OAuth.hpp>
+#ifdef TWITCH_DEVICE_AUTH
+#include <oauth/TwitchAuth.hpp>
+#endif
 #include <utility/GoLiveAPI_Network.hpp>
 #include <utility/GoLiveAPI_PostData.hpp>
 #include <utility/MultitrackVideoError.hpp>
@@ -99,6 +102,12 @@ inline bool AutoConfigStreamPage::IsCustomService() const
 
 bool AutoConfigStreamPage::validatePage()
 {
+#ifdef TWITCH_DEVICE_AUTH
+	if (auto twitch = dynamic_cast<TwitchAuth *>(auth.get()); twitch && twitch->NeedsReconnect()) {
+		OnOAuthStreamKeyConnected();
+		return false;
+	}
+#endif
 	OBSDataAutoRelease service_settings = obs_data_create();
 
 	wiz->customServer = IsCustomService();
@@ -157,6 +166,9 @@ bool AutoConfigStreamPage::validatePage()
 		wiz->preferHardware = ui->preferHardware->isChecked();
 	}
 	wiz->key = ui->key->text().toStdString();
+#ifdef TWITCH_DEVICE_AUTH
+	twitchKeyInvalidated = false;
+#endif
 
 	if (!wiz->customServer) {
 		if (wiz->serviceName == "Twitch") {
@@ -265,6 +277,23 @@ void AutoConfigStreamPage::on_show_clicked()
 
 void AutoConfigStreamPage::OnOAuthStreamKeyConnected()
 {
+#ifdef TWITCH_DEVICE_AUTH
+	if (auto twitch = dynamic_cast<TwitchAuth *>(auth.get())) {
+		if (twitch->NeedsReconnect()) {
+			if (twitch->KeyInvalidated()) {
+				ui->key->clear();
+				twitchKeyInvalidated = true;
+			}
+			auth.reset();
+			std::string service = ui->service->currentText().toStdString();
+			reset_service_ui_fields(service);
+			UpdateCompleted();
+			return;
+		}
+		connect(twitch, &TwitchAuth::AccountStateChanged, this, &AutoConfigStreamPage::OnAuthConnected,
+			Qt::ConnectionType(Qt::QueuedConnection | Qt::UniqueConnection));
+	}
+#endif
 	OAuthStreamKey *a = reinterpret_cast<OAuthStreamKey *>(auth.get());
 
 	if (a) {
@@ -352,6 +381,9 @@ void AutoConfigStreamPage::on_disconnectAccount_clicked()
 
 	OBSBasic *main = OBSBasic::Get();
 
+#ifdef TWITCH_DEVICE_AUTH
+	if (ui->service->currentText() == "Twitch") TwitchAuth::ForgetDeviceSession();
+#endif
 	main->auth.reset();
 	auth.reset();
 

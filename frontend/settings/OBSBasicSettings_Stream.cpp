@@ -4,6 +4,9 @@
 #include <docks/YouTubeAppDock.hpp>
 #endif
 #include <oauth/OAuth.hpp>
+#ifdef TWITCH_DEVICE_AUTH
+#include <oauth/TwitchAuth.hpp>
+#endif
 #ifdef YOUTUBE_ENABLED
 #include <utility/YoutubeApiWrappers.hpp>
 #endif
@@ -266,6 +269,10 @@ void OBSBasicSettings::SwapMultiTrack(const char *protocol)
 
 void OBSBasicSettings::SaveStream1Settings()
 {
+#ifdef TWITCH_DEVICE_AUTH
+	if (auto twitch = dynamic_cast<TwitchAuth *>(auth.get()); twitch && twitch->NeedsReconnect())
+		OnOAuthStreamKeyConnected();
+#endif
 	bool customServer = IsCustomService();
 	bool whip = IsWHIP();
 	const char *service_id = "rtmp_common";
@@ -808,6 +815,23 @@ OBSService OBSBasicSettings::SpawnTempService()
 
 void OBSBasicSettings::OnOAuthStreamKeyConnected()
 {
+#ifdef TWITCH_DEVICE_AUTH
+	if (auto twitch = dynamic_cast<TwitchAuth *>(auth.get())) {
+		if (twitch->NeedsReconnect()) {
+			if (twitch->KeyInvalidated()) ui->key->clear();
+			auth.reset();
+			std::string service = ui->service->currentText().toStdString();
+			reset_service_ui_fields(ui.get(), service, loading);
+			ui->bandwidthTestEnable->setChecked(false);
+			ui->bandwidthTestEnable->setVisible(false);
+			ui->twitchAddonLabel->setVisible(false);
+			ui->twitchAddonDropdown->setVisible(false);
+			return;
+		}
+		connect(twitch, &TwitchAuth::AccountStateChanged, this, &OBSBasicSettings::OnAuthConnected,
+			Qt::ConnectionType(Qt::QueuedConnection | Qt::UniqueConnection));
+	}
+#endif
 	OAuthStreamKey *a = reinterpret_cast<OAuthStreamKey *>(auth.get());
 
 	if (a) {
@@ -827,6 +851,13 @@ void OBSBasicSettings::OnOAuthStreamKeyConnected()
 		ui->connectedAccountText->setVisible(false);
 
 		if (strcmp(a->service(), "Twitch") == 0) {
+#ifdef TWITCH_DEVICE_AUTH
+			if (auto twitch = dynamic_cast<TwitchAuth *>(a)) {
+				ui->connectedAccountLabel->setVisible(true);
+				ui->connectedAccountText->setVisible(true);
+				ui->connectedAccountText->setText(twitch->AccountName());
+			}
+#endif
 			ui->bandwidthTestEnable->setVisible(true);
 			ui->twitchAddonLabel->setVisible(true);
 			ui->twitchAddonDropdown->setVisible(true);
@@ -900,6 +931,9 @@ void OBSBasicSettings::on_disconnectAccount_clicked()
 		return;
 	}
 
+#ifdef TWITCH_DEVICE_AUTH
+	if (ui->service->currentText() == "Twitch") TwitchAuth::ForgetDeviceSession();
+#endif
 	main->auth.reset();
 	auth.reset();
 	main->SetBroadcastFlowEnabled(false);

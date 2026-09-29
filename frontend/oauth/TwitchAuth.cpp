@@ -11,6 +11,11 @@
 
 #include <QTimer>
 #include <QUuid>
+#ifdef TWITCH_DEVICE_AUTH
+#include "TwitchDeviceLogin.hpp"
+#include "TwitchTokenStore.hpp"
+#include <QDesktopServices>
+#endif
 
 #include "moc_TwitchAuth.cpp"
 
@@ -28,12 +33,46 @@ using namespace json11;
 #define TWITCH_STATS_DOCK_NAME "twitchStats"
 #define TWITCH_FEED_DOCK_NAME "twitchFeed"
 
+#ifdef TWITCH_DEVICE_AUTH
+static Auth::Def twitchDef = {"Twitch", Auth::Type::OAuth_StreamKey, true, false};
+
+static twitch::SessionStore deviceSessionStore()
+{
+	BPtr<char> path = GetAppConfigPathPtr("obs-studio/twitch-device-sessions");
+	return twitch::SessionStore(path ? QString::fromUtf8(path.Get()) : QString{});
+}
+#else
 static Auth::Def twitchDef = {"Twitch", Auth::Type::OAuth_StreamKey};
+#endif
 
 /* ------------------------------------------------------------------------- */
 
 TwitchAuth::TwitchAuth(const Def &d) : OAuthStreamKey(d)
 {
+#ifdef TWITCH_DEVICE_AUTH
+	connect(&deviceFlow, &twitch::DeviceFlow::credentialsChanged, this, [this] {
+		const auto &credentials = deviceFlow.credentials();
+		name = credentials.login.toStdString();
+		token = credentials.accessToken.toStdString();
+		refresh_token = credentials.refreshToken.toStdString();
+		if (OBSBasic::Get()->GetAuth() == this) Auth::Save();
+	});
+	connect(&deviceFlow, &twitch::DeviceFlow::authenticated, this, [this] {
+		needsReconnect = false;
+		keyInvalidated = false;
+		key_ = deviceFlow.streamKey().toStdString();
+		if (OBSBasic::Get()->GetAuth() == this) {
+			OAuthStreamKey::OnStreamConfig();
+			OBSBasic::Get()->SaveService();
+			LoadUI();
+		}
+		emit AccountStateChanged();
+	});
+	connect(&deviceFlow, &twitch::DeviceFlow::failed, this, [this](const QString &message, bool reauthorize) {
+		blog(LOG_WARNING, "Twitch device authorization: %s", QT_TO_UTF8(message));
+		if (reauthorize) RequireReconnect(message, true);
+	});
+#endif
 	if (!cef) {
 		return;
 	}
@@ -117,6 +156,9 @@ bool TwitchAuth::MakeApiRequest(const char *path, Json &json_out)
 
 bool TwitchAuth::GetChannelInfo()
 try {
+#ifdef TWITCH_DEVICE_AUTH
+	return !key_.empty();
+#else
 	std::string client_id = TWITCH_CLIENTID;
 	deobfuscate_str(&client_id[0], TWITCH_HASH);
 
@@ -148,6 +190,7 @@ try {
 	key_ = json["data"][0]["stream_key"].string_value();
 
 	return true;
+#endif
 } catch (ErrorInfo info) {
 	QString title = QTStr("Auth.ChannelFailure.Title");
 	QString text = QTStr("Auth.ChannelFailure.Text").arg(service(), info.message.c_str(), info.error.c_str());
@@ -160,6 +203,9 @@ try {
 
 void TwitchAuth::SaveInternal()
 {
+#ifdef TWITCH_DEVICE_AUTH
+	if (needsReconnect) return;
+#endif
 	OBSBasic *main = OBSBasic::Get();
 	config_set_string(main->Config(), service(), "Name", name.c_str());
 	config_set_string(main->Config(), service(), "UUID", uuid.c_str());
@@ -167,7 +213,23 @@ void TwitchAuth::SaveInternal()
 	if (uiLoaded) {
 		config_set_string(main->Config(), service(), "DockState", main->saveState().toBase64().constData());
 	}
+#ifdef TWITCH_DEVICE_AUTH
+	const auto &credentials = deviceFlow.credentials();
+	if (credentials.refreshToken.isEmpty()) return;
+	if (deviceSessionId.isEmpty()) deviceSessionId = twitch::SessionStore::newId();
+	if (!deviceSessionStore().write(deviceSessionId, credentials)) {
+		blog(LOG_ERROR, "Could not save Twitch device credentials protected with Windows DPAPI");
+		return;
+	}
+	config_set_string(main->Config(), service(), "DeviceSessionId", QT_TO_UTF8(deviceSessionId));
+	config_set_string(main->Config(), service(), "PublicClientId", QT_TO_UTF8(credentials.clientId));
+	// This login is never written through OAuth's plain-text token storage.
+	config_remove_value(main->Config(), service(), "DeviceSession");
+	config_remove_value(main->Config(), service(), "Token");
+	config_remove_value(main->Config(), service(), "RefreshToken");
+#else
 	OAuthStreamKey::SaveInternal();
+#endif
 }
 
 static inline std::string get_config_str(OBSBasic *main, const char *section, const char *name)
@@ -178,16 +240,30 @@ static inline std::string get_config_str(OBSBasic *main, const char *section, co
 
 bool TwitchAuth::LoadInternal()
 {
+#ifndef TWITCH_DEVICE_AUTH
 	if (!cef) {
 		return false;
 	}
+#endif
 
 	OBSBasic *main = OBSBasic::Get();
 	name = get_config_str(main, service(), "Name");
 	uuid = get_config_str(main, service(), "UUID");
 
 	firstLoad = false;
+#ifdef TWITCH_DEVICE_AUTH
+	deviceSessionId = QString::fromStdString(get_config_str(main, service(), "DeviceSessionId"));
+	auto credentials = deviceSessionStore().read(deviceSessionId);
+	if (!credentials) {
+		// A legacy/imported profile is not evidence of server-side revocation.
+		RequireReconnect(QTStr("TwitchAuth.Device.LocalSessionMissing"), false);
+		return false;
+	}
+	deviceFlow.restore(*credentials);
+	return true;
+#else
 	return OAuthStreamKey::LoadInternal();
+#endif
 }
 
 static const char *ffz_script = "\
@@ -209,6 +285,9 @@ static const char *referrer_script2 = "'; }});";
 
 void TwitchAuth::LoadUI()
 {
+#ifdef TWITCH_DEVICE_AUTH
+	if (OBSBasic::Get()->GetAuth() == this && !deviceFlow.credentials().refreshToken.isEmpty()) Auth::Save();
+#endif
 	if (!cef) {
 		return;
 	}
@@ -452,6 +531,9 @@ void TwitchAuth::TryLoadSecondaryUIPanes()
 
 bool TwitchAuth::RetryLogin()
 {
+#ifdef TWITCH_DEVICE_AUTH
+	return DeviceLogin(OBSBasic::Get());
+#else
 	OAuthLogin login(OBSBasic::Get(), TWITCH_AUTH_URL, false);
 	if (login.exec() == QDialog::Rejected) {
 		return false;
@@ -462,10 +544,15 @@ bool TwitchAuth::RetryLogin()
 	deobfuscate_str(&client_id[0], TWITCH_HASH);
 
 	return GetToken(TWITCH_TOKEN_URL, client_id, TWITCH_SCOPE_VERSION, QT_TO_UTF8(login.GetCode()), true);
+#endif
 }
 
 std::shared_ptr<Auth> TwitchAuth::Login(QWidget *parent, const std::string &)
 {
+#ifdef TWITCH_DEVICE_AUTH
+	auto auth = std::make_shared<TwitchAuth>(twitchDef);
+	return auth->DeviceLogin(parent) ? auth : nullptr;
+#else
 	OAuthLogin login(parent, TWITCH_AUTH_URL, false);
 	if (login.exec() == QDialog::Rejected) {
 		return nullptr;
@@ -485,7 +572,63 @@ std::shared_ptr<Auth> TwitchAuth::Login(QWidget *parent, const std::string &)
 	}
 
 	return nullptr;
+#endif
 }
+
+#ifdef TWITCH_DEVICE_AUTH
+void TwitchAuth::RequireReconnect(const QString &message, bool invalidateSession)
+{
+	needsReconnect = true;
+	keyInvalidated = invalidateSession;
+	key_.clear();
+	deviceFlow.cancel();
+	if (invalidateSession && !deviceSessionId.isEmpty()) deviceSessionStore().remove(deviceSessionId);
+	emit AccountStateChanged();
+	auto main = OBSBasic::Get();
+	if (main->GetAuth() != this) return;
+	if (invalidateSession) {
+		OBSDataAutoRelease settings = obs_service_get_settings(main->GetService());
+		obs_data_set_string(settings, "key", "");
+		obs_service_update(main->GetService(), settings);
+		main->SaveService();
+		config_remove_value(main->Config(), service(), "DeviceSessionId");
+	}
+	QPointer<TwitchAuth> self(this);
+	QMetaObject::invokeMethod(main, [self, message] {
+		if (!self || OBSBasic::Get()->GetAuth() != self) return;
+		config_remove_value(OBSBasic::Get()->Config(), "Auth", "Type");
+		Auth::Load();
+		config_save_safe(OBSBasic::Get()->Config(), "tmp", nullptr);
+		QMessageBox::warning(OBSBasic::Get(), QTStr("TwitchAuth.Device.Title"), message);
+	}, Qt::QueuedConnection);
+}
+
+bool TwitchAuth::DeviceLogin(QWidget *parent)
+{
+	QString clientId = QString::fromStdString(get_config_str(OBSBasic::Get(), service(), "PublicClientId"));
+	if (clientId.isEmpty()) clientId = QString::fromUtf8(TWITCH_PUBLIC_CLIENTID);
+	twitch::DeviceLogin login(deviceFlow, clientId, parent, [](const char *key) { return QTStr(key); });
+	connect(&login, &twitch::DeviceLogin::openBrowser, &login, [](const QUrl &url) { QDesktopServices::openUrl(url); });
+	return login.exec() == QDialog::Accepted;
+}
+
+void TwitchAuth::ForgetDeviceSession()
+{
+	auto config = OBSBasic::Get()->Config();
+	const char *id = config_get_string(config, "Twitch", "DeviceSessionId");
+	if (id) deviceSessionStore().remove(QString::fromUtf8(id));
+	if (auto auth = dynamic_cast<TwitchAuth *>(OBSBasic::Get()->GetAuth())) {
+		auth->deviceFlow.cancel();
+		auth->needsReconnect = true;
+		auth->keyInvalidated = true;
+		auth->key_.clear();
+		emit auth->AccountStateChanged();
+	}
+	for (const char *key : {"DeviceSessionId", "DeviceSession", "Token", "RefreshToken", "ExpireTime", "ScopeVer", "Name"})
+		config_remove_value(config, "Twitch", key);
+	config_save_safe(config, "tmp", nullptr);
+}
+#endif
 
 static std::shared_ptr<Auth> CreateTwitchAuth()
 {

@@ -20,6 +20,9 @@ class AutoConfigStreamPage : public QWizardPage {
 	std::unique_ptr<Ui_AutoConfigStreamPage> ui;
 	QString lastService;
 	bool ready = false;
+#ifdef TWITCH_DEVICE_AUTH
+	bool twitchKeyInvalidated = false;
+#endif
 
 	void LoadServices(bool showAll);
 	inline bool IsCustomService() const;
