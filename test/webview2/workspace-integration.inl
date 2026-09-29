@@ -117,16 +117,169 @@ void runDockTabsChecks(std::function<void(bool, const char *)> check, std::funct
                   main->tabifiedDockWidgets(scenes).contains(controls),
                   "Dropping one panel onto another joins them as clickable native tabs");
             restoreSurfaces();
-            check(main->tabPosition(Qt::LeftDockWidgetArea) == nativeDockTabPositions[0],
-                  "Switching back to original OBS restores its previous native tab placement");
+            check(main->tabPosition(Qt::LeftDockWidgetArea) == nativeDockTabPositions[0] &&
+                  main->dockOptions() == nativeDockOptions,
+                  "Switching back to original OBS restores its previous dock tab and drag settings");
             resumeFrontend();
-            check(main->tabPosition(Qt::LeftDockWidgetArea) == QTabWidget::North,
-                  "Resuming WebView2 places combined panel tabs beside their headers again");
+            check(main->tabPosition(Qt::LeftDockWidgetArea) == QTabWidget::North &&
+                  main->dockOptions().testFlag(QMainWindow::GroupedDragging),
+                  "Resuming WebView2 places top tabs and allows dragging them out again");
             main->restoreState(layout);
             if (lock) lock->setChecked(wasLocked);
             done();
         });
     });
+}
+
+void runDockTabDetachChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
+{
+    auto *scenes = main->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
+    auto *controls = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
+    auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
+    if (!scenes || !controls || !lock) { check(false, "Grouped panel tear-out fixture exists"); done(); return; }
+    const auto original = main->saveState();
+    const bool wasLocked = lock->isChecked();
+    lock->setChecked(false);
+    main->showNormal();
+    main->resize(1280, 840);
+    main->addDockWidget(Qt::LeftDockWidgetArea, scenes);
+    main->addDockWidget(Qt::RightDockWidgetArea, controls);
+    scenes->show();
+    controls->show();
+    main->tabifyDockWidget(scenes, controls);
+    controls->raise();
+    QTimer::singleShot(180, this, [this, scenes = QPointer<QDockWidget>(scenes),
+        controls = QPointer<QDockWidget>(controls), lock = QPointer<QAction>(lock),
+        original, wasLocked, check, done] {
+        if (!scenes || !controls) { check(false, "Grouped docks survive before tab drag"); done(); return; }
+        QPointer<QTabBar> tabs;
+        int targetIndex = -1;
+        for (auto *bar : main->findChildren<QTabBar *>()) {
+            bool hasScenes = false;
+            int controlsIndex = -1;
+            for (int i = 0; i < bar->count(); ++i) {
+                hasScenes |= bar->tabText(i) == scenes->windowTitle();
+                if (bar->tabText(i) == controls->windowTitle()) controlsIndex = i;
+            }
+            if (hasScenes && controlsIndex >= 0 && bar->isVisible()) {
+                tabs = bar;
+                targetIndex = controlsIndex;
+                break;
+            }
+        }
+        check(tabs && targetIndex >= 0 && main->tabifiedDockWidgets(scenes).contains(controls),
+              "Grouped dock exposes a draggable tab for the panel being removed");
+        if (tabs) {
+            auto mouse = [](QWidget *widget, QEvent::Type type, QPoint global, Qt::MouseButton button, Qt::MouseButtons buttons) {
+                const QPointF local = widget->mapFromGlobal(global);
+                QMouseEvent event(type, local, local, QPointF(global), button, buttons, Qt::NoModifier);
+                QApplication::sendEvent(widget, &event);
+            };
+            const QPoint grip = tabs->mapToGlobal(tabs->tabRect(targetIndex).center());
+            const QPoint outside = main->mapToGlobal(QPoint(main->width() + 140, main->height() / 2));
+            blog(LOG_INFO, "[WebView2 tab tear-out] tab movable=%d grip=%d,%d outside=%d,%d",
+                 tabs->isMovable(), grip.x(), grip.y(), outside.x(), outside.y());
+            mouse(tabs, QEvent::MouseButtonPress, grip, Qt::LeftButton, Qt::LeftButton);
+            if (tabs) mouse(tabs, QEvent::MouseMove, grip + QPoint(35, 1), Qt::NoButton, Qt::LeftButton);
+            if (tabs) mouse(tabs, QEvent::MouseMove, outside, Qt::NoButton, Qt::LeftButton);
+            if (tabs) mouse(tabs, QEvent::MouseButtonRelease, outside, Qt::LeftButton, Qt::NoButton);
+        }
+        QTimer::singleShot(220, this, [this, scenes, controls, lock, original, wasLocked, check, done] {
+            check(scenes && controls && controls->isFloating() && scenes->isVisible() &&
+                  !main->tabifiedDockWidgets(scenes).contains(controls) &&
+                  webDockViews.value(scenes) && webDockViews.value(controls),
+                  "Dragging a grouped tab outside OBS detaches that panel while the other remains usable");
+            main->restoreState(original);
+            if (lock) lock->setChecked(wasLocked);
+            done();
+        });
+    });
+}
+
+void runWindowFrameChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
+{
+    auto captureFrame = [](QWidget *window, const QString &name) -> QImage {
+        const auto artifacts = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
+        if (!window) return {};
+        window->raise();
+        window->activateWindow();
+        QCoreApplication::processEvents();
+        const auto hwnd = reinterpret_cast<HWND>(window->winId());
+        RECT rect{};
+        if (!GetWindowRect(hwnd, &rect)) return {};
+        const int width = rect.right - rect.left;
+        const int height = rect.bottom - rect.top;
+        if (width <= 0 || height <= 0) return {};
+        HDC source = GetWindowDC(hwnd);
+        if (!source) return {};
+        HDC target = CreateCompatibleDC(source);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        void *pixels = nullptr;
+        HBITMAP bitmap = CreateDIBSection(source, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        QImage image;
+        if (target && bitmap && pixels) {
+            HGDIOBJ previous = SelectObject(target, bitmap);
+            if (!PrintWindow(hwnd, target, PW_RENDERFULLCONTENT))
+                BitBlt(target, 0, 0, width, height, source, 0, 0, SRCCOPY);
+            image = QImage(reinterpret_cast<uchar *>(pixels), width, height, QImage::Format_RGB32)
+                .copy(0, 0, width, qMin(height, 70));
+            if (!artifacts.isEmpty()) image.save(QDir(artifacts).filePath(name));
+            SelectObject(target, previous);
+        }
+        if (bitmap) DeleteObject(bitmap);
+        if (target) DeleteDC(target);
+        ReleaseDC(hwnd, source);
+        return image;
+    };
+    auto matchesPalette = [](const QImage &frame, const QWidget *window) {
+        if (frame.isNull() || frame.width() < 16 || frame.height() < 16 || !window) return false;
+        const QColor expected = window->palette().color(QPalette::Window);
+        const QColor actual = frame.pixelColor(frame.width() / 2, 5);
+        // Floating docks draw their own Qt title with a slightly darker style color.
+        return std::abs(actual.red() - expected.red()) <= 12 &&
+               std::abs(actual.green() - expected.green()) <= 12 &&
+               std::abs(actual.blue() - expected.blue()) <= 12;
+    };
+    const auto mainFrame = captureFrame(main, QStringLiteral("frame-main.png"));
+    check(matchesPalette(mainFrame, main), "Main OBS caption uses its Qt theme instead of the Windows accent color");
+
+    QDialog dialog(main);
+    dialog.setWindowTitle(QStringLiteral("WebView2 themed window test"));
+    dialog.show();
+    QCoreApplication::processEvents();
+    const auto dialogFrame = captureFrame(&dialog, QStringLiteral("frame-dialog.png"));
+    check(matchesPalette(dialogFrame, &dialog), "New application dialogs inherit the themed native caption");
+    auto palette = dialog.palette();
+    palette.setColor(QPalette::Window, QColor(QStringLiteral("#263449")));
+    palette.setColor(QPalette::WindowText, QColor(QStringLiteral("#f0e0d0")));
+    dialog.setPalette(palette);
+    QCoreApplication::processEvents();
+    const auto changedFrame = captureFrame(&dialog, QStringLiteral("frame-dialog-custom.png"));
+    check(matchesPalette(changedFrame, &dialog) &&
+          changedFrame.pixelColor(changedFrame.width() / 2, 5) != dialogFrame.pixelColor(dialogFrame.width() / 2, 5),
+          "Changing a window's palette updates its native title frame without reopening it");
+    dialog.close();
+
+    auto *dock = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
+    auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
+    if (!dock || !lock) { check(false, "Floating themed dock fixture exists"); done(); return; }
+    const auto original = main->saveState();
+    const bool wasLocked = lock->isChecked();
+    lock->setChecked(false);
+    dock->setFloating(true);
+    dock->show();
+    QCoreApplication::processEvents();
+    const auto dockFrame = captureFrame(dock, QStringLiteral("frame-floating-dock.png"));
+    check(matchesPalette(dockFrame, dock), "Floating WebView2 panels also use their Qt theme for the window frame");
+    main->restoreState(original);
+    lock->setChecked(wasLocked);
+    done();
 }
 
 void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> check, std::function<void()> done)

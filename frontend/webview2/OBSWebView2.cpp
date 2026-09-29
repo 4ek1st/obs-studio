@@ -33,12 +33,15 @@
 #include <QPushButton>
 #include <QKeyEvent>
 #include <QDir>
+#include <QDialog>
 #include <QCryptographicHash>
 #include <QMessageBox>
 #include <QHash>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QLibrary>
 #include <QMenu>
 #include <QMenuBar>
 #include <QPointer>
@@ -71,6 +74,8 @@
 #include <QHBoxLayout>
 #include <QWindow>
 #include <QApplication>
+#include <Windows.h>
+#include <dwmapi.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -87,6 +92,78 @@
 #endif
 
 namespace {
+class ThemeWindowFrames final : public QObject {
+    using SetAttribute = HRESULT(WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
+    struct AppliedFrame { WId id; COLORREF caption; COLORREF text; BOOL dark; };
+    QHash<QWidget *, AppliedFrame> applied;
+
+    static bool hasCaption(QWidget *window)
+    {
+        if (!window || !window->isWindow()) return false;
+        const auto type = window->windowType();
+        return type != Qt::Popup && type != Qt::ToolTip && type != Qt::SplashScreen;
+    }
+
+public:
+    explicit ThemeWindowFrames(QObject *parent) : QObject(parent) { qApp->installEventFilter(this); }
+
+    void apply(QWidget *window)
+    {
+        if (!hasCaption(window)) return;
+        const auto id = window->internalWinId();
+        if (!id) return;
+        static auto setAttribute = reinterpret_cast<SetAttribute>(QLibrary::resolve(QStringLiteral("dwmapi"), "DwmSetWindowAttribute"));
+        if (!setAttribute) return;
+        const auto palette = window->palette();
+        const QColor background = palette.color(QPalette::Window);
+        const QColor foreground = palette.color(QPalette::WindowText);
+        const COLORREF caption = RGB(background.red(), background.green(), background.blue());
+        const COLORREF text = RGB(foreground.red(), foreground.green(), foreground.blue());
+        const BOOL dark = background.lightness() < 128;
+        const auto previous = applied.constFind(window);
+        if (previous != applied.cend() && previous->id == id && previous->caption == caption &&
+            previous->text == text && previous->dark == dark) return;
+        const auto hwnd = reinterpret_cast<HWND>(id);
+        const auto darkResult = setAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+        const auto captionResult = setAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+        const auto borderResult = setAttribute(hwnd, DWMWA_BORDER_COLOR, &caption, sizeof(caption));
+        const auto textResult = setAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
+        if (FAILED(darkResult) || FAILED(captionResult) || FAILED(borderResult) || FAILED(textResult))
+            blog(LOG_WARNING, "[WebView2] Theme frame attributes unavailable for %s: dark=%lx caption=%lx border=%lx text=%lx",
+                 window->objectName().toUtf8().constData(), darkResult, captionResult, borderResult, textResult);
+        else {
+            if (previous == applied.cend())
+                connect(window, &QObject::destroyed, this, [this, window] { applied.remove(window); });
+            applied.insert(window, {id, caption, text, dark});
+        }
+    }
+
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        if (auto *window = qobject_cast<QWidget *>(object)) {
+            switch (event->type()) {
+            case QEvent::WinIdChange:
+            case QEvent::Show:
+            case QEvent::PaletteChange:
+            case QEvent::ApplicationPaletteChange:
+            case QEvent::WindowActivate:
+            case QEvent::WindowDeactivate:
+                apply(window);
+                break;
+            default: break;
+            }
+        }
+        return QObject::eventFilter(object, event);
+    }
+};
+
+void installThemeWindowFrames()
+{
+    static auto *frames = new ThemeWindowFrames(qApp);
+    for (auto *window : QApplication::topLevelWidgets()) frames->apply(window);
+}
+
 struct NativePlacement {
 	QPointer<QWidget> parent;
 	QPointer<QLayout> layout;
@@ -149,6 +226,7 @@ class OBSWebView2 final : public QWidget {
 	QPointer<QWidget> nativeCentral;
 	bool workspaceMounted = false;
 	std::array<QTabWidget::TabPosition, 4> nativeDockTabPositions{};
+	QMainWindow::DockOptions nativeDockOptions{};
 	bool dockTabPositionsSaved = false;
 	WebView2Widget *browser;
 	OBSQTDisplay *preview;
@@ -652,6 +730,7 @@ public:
 	{
 		if (workspaceMounted) return;
 		if (!dockTabPositionsSaved) {
+			nativeDockOptions = main->dockOptions();
 			int index = 0;
 			for (const auto area : {Qt::LeftDockWidgetArea, Qt::RightDockWidgetArea,
 			                        Qt::TopDockWidgetArea, Qt::BottomDockWidgetArea})
@@ -660,6 +739,8 @@ public:
 		}
 		// A combined dock should reveal both panel names beside its header.
 		// QMainWindow still owns native drag, tab switching and layout persistence.
+		// Qt requires GroupedDragging to unplug an individual tab by dragging it.
+		main->setDockOptions(main->dockOptions() | QMainWindow::GroupedDragging);
 		main->setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
 		nativeCentral = main->takeCentralWidget();
 		if (nativeCentral) {
@@ -679,6 +760,7 @@ public:
 	{
 		if (!workspaceMounted) return;
 		if (dockTabPositionsSaved) {
+			main->setDockOptions(nativeDockOptions);
 			int index = 0;
 			for (const auto area : {Qt::LeftDockWidgetArea, Qt::RightDockWidgetArea,
 			                        Qt::TopDockWidgetArea, Qt::BottomDockWidgetArea})
@@ -866,6 +948,7 @@ void InstallWebView2Frontend(OBSBasic *window)
 		return;
 	}
 #endif
+	installThemeWindowFrames();
 	auto *action = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction("WebView2"));
 	action->setProperty("webview2Entry", true);
 	QObject::connect(action, &QAction::triggered, window, [window] {
