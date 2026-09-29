@@ -25,6 +25,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 extern struct obs_source_info duplicator_capture_info;
 extern struct obs_source_info monitor_capture_info;
 extern struct obs_source_info window_capture_info;
+extern struct obs_source_info temporary_window_capture_info;
 extern struct obs_source_info game_capture_info;
 
 static HANDLE init_hooks_thread = NULL;
@@ -143,6 +144,7 @@ bool obs_module_load(void)
 		obs_register_source(&monitor_capture_info);
 
 	obs_register_source(&window_capture_info);
+	obs_register_source(&temporary_window_capture_info);
 
 	char *config_path = obs_module_config_path(NULL);
 

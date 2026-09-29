@@ -108,27 +108,29 @@ public:
 	}
 };
 
-QString windowDropSelector(HWND window, QString &caption)
+QString windowDropCaption(HWND window)
 {
-	dstr title{}, windowClass{}, executable{};
-	const bool hasExecutable = ms_get_window_exe(&executable, window);
+	dstr title{}, executable{};
 	ms_get_window_title(&title, window);
-	ms_get_window_class(&windowClass, window);
-	const QString name = QString::fromUtf8(executable.array ? executable.array : "");
-	caption = QString::fromUtf8(title.array ? title.array : "");
-	if (caption.isEmpty()) caption = name;
-	auto encode = [](const char *value) {
-		return QString::fromUtf8(value ? value : "").replace(QLatin1Char('#'), QStringLiteral("#22"))
-			.replace(QLatin1Char(':'), QStringLiteral("#3A"));
-	};
-	const QString selector = hasExecutable && !name.isEmpty() && !dstr_is_empty(&windowClass)
-					 ? encode(title.array) + QLatin1Char(':') + encode(windowClass.array) + QLatin1Char(':') +
-						 encode(executable.array)
-					 : QString();
+	ms_get_window_exe(&executable, window);
+	QString caption = QString::fromUtf8(title.array ? title.array : "");
+	if (caption.isEmpty()) caption = QString::fromUtf8(executable.array ? executable.array : "");
+	if (caption.isEmpty()) caption = QTStr("WindowDrop.Untitled");
 	dstr_free(&title);
-	dstr_free(&windowClass);
 	dstr_free(&executable);
-	return selector;
+	return caption;
+}
+
+bool bindMovedWindow(obs_source_t *source, HWND window)
+{
+	auto *handler = obs_source_get_proc_handler(source);
+	if (!handler) return false;
+	calldata_t call{};
+	calldata_set_ptr(&call, "window", window);
+	const bool called = proc_handler_call(handler, "bind_window", &call);
+	const bool accepted = called && calldata_bool(&call, "accepted");
+	calldata_free(&call);
+	return accepted;
 }
 
 void fitMovedWindow(obs_sceneitem_t *item)
@@ -156,21 +158,20 @@ void OBSBasic::AddMovedWindowCapture(void *nativeWindow)
 	HWND window = static_cast<HWND>(nativeWindow);
 	OBSScene scene = GetCurrentScene();
 	if (!scene || !IsWindow(window)) return;
-	QString caption;
-	const QString selector = windowDropSelector(window, caption);
-	if (selector.isEmpty()) return;
-	const QByteArray selectorUtf8 = selector.toUtf8();
-	bool exists = false;
-	std::pair<const QByteArray *, bool *> match{&selectorUtf8, &exists};
+	obs_source_t *existing = nullptr;
 	obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *value) {
-		auto *data = static_cast<std::pair<const QByteArray *, bool *> *>(value);
+		auto **found = static_cast<obs_source_t **>(value);
 		auto *source = obs_sceneitem_get_source(item);
-		if (strcmp(obs_source_get_id(source), "window_capture") != 0) return true;
-		OBSDataAutoRelease settings = obs_source_get_settings(source);
-		if (data->first->compare(obs_data_get_string(settings, "window")) == 0) *data->second = true;
-		return !*data->second;
-	}, &match);
-	if (exists) return;
+		if (strcmp(obs_source_get_id(source), "temporary_window_capture") != 0) return true;
+		*found = source;
+		return false;
+	}, &existing);
+	if (existing) {
+		bindMovedWindow(existing, window);
+		return;
+	}
+
+	const QString caption = windowDropCaption(window);
 
 	QStringList layers;
 	obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *value) {
@@ -193,9 +194,9 @@ void OBSBasic::AddMovedWindowCapture(void *nativeWindow)
 	if (dialog.exec() != QDialog::Accepted) return;
 	auto *combo = dialog.findChild<QComboBox *>();
 	const int position = layers.size() - (combo ? combo->currentIndex() : 0);
-	const char *type = obs_get_latest_input_type_id("window_capture");
+	const char *type = obs_get_latest_input_type_id("temporary_window_capture");
 	if (!type) return;
-	QString base = QTStr("WindowDrop.Source").arg(caption.left(80));
+	QString base = QTStr("WindowDrop.Source");
 	QString name = base;
 	for (int n = 2; ; ++n) {
 		const QByteArray candidate = name.toUtf8();
@@ -204,8 +205,6 @@ void OBSBasic::AddMovedWindowCapture(void *nativeWindow)
 		name = base + QStringLiteral(" (%1)").arg(n);
 	}
 	OBSDataAutoRelease settings = obs_data_create();
-	obs_data_set_string(settings, "window", selectorUtf8.constData());
-	obs_data_set_int(settings, "priority", WINDOW_PRIORITY_EXE);
 	obs_data_set_bool(settings, "cursor", true);
 	obs_data_set_bool(settings, "client_area", true);
 	const QByteArray nameUtf8 = name.toUtf8();
@@ -215,6 +214,7 @@ void OBSBasic::AddMovedWindowCapture(void *nativeWindow)
 	if (!item) return;
 	obs_sceneitem_set_order_position(item, position);
 	fitMovedWindow(item);
+	bindMovedWindow(source, window);
 	const std::string sceneUuid = obs_source_get_uuid(obs_scene_get_source(scene));
 	const std::string sourceUuid = obs_source_get_uuid(source);
 	OBSDataAutoRelease saved = obs_save_source(source);

@@ -5,6 +5,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <cmath>
+#include <cwchar>
 
 using Microsoft::WRL::ComPtr;
 static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -21,10 +22,12 @@ static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPA
 	return DefWindowProcW(window, message, wparam, lparam);
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int)
 {
 	WNDCLASSW wc{}; wc.hInstance = instance; wc.lpfnWndProc = WindowProc;
-	wc.lpszClassName = L"OBSWebViewCaptureFixture";
+	// The Chrome-like class exercises OBS's WGC capture path in a second run.
+	wc.lpszClassName = arguments && wcsstr(arguments, L"--wgc")
+				   ? L"OBSChromeWindowCaptureFixture" : L"OBSWebViewCaptureFixture";
 	RegisterClassW(&wc);
 	RECT bounds{0, 0, 640, 360}; AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
 	auto window = CreateWindowW(wc.lpszClassName, L"OBS capture QA target", WS_OVERLAPPEDWINDOW,

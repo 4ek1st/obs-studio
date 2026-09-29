@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 #include <util/dstr.h>
 #include <util/threading.h>
 #include <util/windows/window-helpers.h>
@@ -78,6 +79,16 @@ struct window_capture {
 	obs_source_t *audio_source;
 
 	pthread_mutex_t update_mutex;
+	/* The temporary source receives an HWND only from the OBS preview.
+	 * Neither that HWND nor a selector is saved in scene settings. */
+	bool temporary;
+	bool pending_bind;
+	HWND pending_window;
+	enum window_capture_method pending_method;
+	DWORD pending_process;
+	DWORD pending_thread;
+	DWORD target_process;
+	DWORD target_thread;
 
 	char *title;
 	char *class;
@@ -268,6 +279,42 @@ static const char *wc_getname(void *unused)
 	return TEXT_WINDOW_CAPTURE;
 }
 
+static const char *wc_temporary_getname(void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	return obs_module_text("TemporaryWindowCapture");
+}
+
+static void wc_bind_temporary_window(void *data, calldata_t *cd)
+{
+	struct window_capture *wc = data;
+	HWND window = (HWND)calldata_ptr(cd, "window");
+	if (!wc || !wc->temporary || !window || !IsWindow(window)) {
+		calldata_set_bool(cd, "accepted", false);
+		return;
+	}
+
+	struct dstr window_class = {0};
+	DWORD process = 0;
+	const DWORD thread = GetWindowThreadProcessId(window, &process);
+	if (!process || !thread) {
+		calldata_set_bool(cd, "accepted", false);
+		return;
+	}
+	ms_get_window_class(&window_class, window);
+	const enum window_capture_method method = choose_method(METHOD_AUTO, wgc_supported, window_class.array);
+	dstr_free(&window_class);
+
+	pthread_mutex_lock(&wc->update_mutex);
+	wc->pending_window = window;
+	wc->pending_method = method;
+	wc->pending_process = process;
+	wc->pending_thread = thread;
+	wc->pending_bind = true;
+	pthread_mutex_unlock(&wc->update_mutex);
+	calldata_set_bool(cd, "accepted", true);
+}
+
 #define WINRT_IMPORT(func)                                           \
 	do {                                                         \
 		exports->func = (PFN_##func)os_dlsym(module, #func); \
@@ -304,6 +351,9 @@ static void *wc_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct window_capture *wc = bzalloc(sizeof(struct window_capture));
 	wc->source = source;
+	wc->temporary = strcmp(obs_source_get_id(source), "temporary_window_capture") == 0;
+	if (wc->temporary)
+		obs_data_set_string(settings, "window", "");
 
 	pthread_mutex_init(&wc->update_mutex, NULL);
 
@@ -340,6 +390,8 @@ static void *wc_create(obs_data_t *settings, obs_source_t *source)
 	proc_handler_add(ph,
 			 "void get_hooked(out bool hooked, out string title, out string class, out string executable)",
 			 wc_get_hooked, wc);
+	if (wc->temporary)
+		proc_handler_add(ph, "void bind_window(ptr window, out bool accepted)", wc_bind_temporary_window, wc);
 
 	signal_handler_connect(sh, "rename", rename_audio_source, &wc->audio_source);
 
@@ -397,15 +449,26 @@ static void force_reset(struct window_capture *wc)
 static void wc_update(void *data, obs_data_t *settings)
 {
 	struct window_capture *wc = data;
+	if (wc->temporary)
+		return;
 	update_settings(wc, settings);
 	log_settings(wc, settings);
 
 	force_reset(wc);
 }
 
+static bool temporary_window_valid(struct window_capture *wc)
+{
+	if (!wc->window || !IsWindow(wc->window))
+		return false;
+	DWORD process = 0;
+	const DWORD thread = GetWindowThreadProcessId(wc->window, &process);
+	return thread == wc->target_thread && process == wc->target_process;
+}
+
 static bool window_normal(struct window_capture *wc)
 {
-	return (IsWindow(wc->window) && !IsIconic(wc->window));
+	return (wc->temporary ? temporary_window_valid(wc) : IsWindow(wc->window)) && !IsIconic(wc->window);
 }
 
 static uint32_t wc_width(void *data)
@@ -415,7 +478,8 @@ static uint32_t wc_width(void *data)
 	if (!window_normal(wc))
 		return 0;
 
-	return (wc->method == METHOD_WGC) ? wc->exports.winrt_capture_width(wc->capture_winrt) : wc->capture.width;
+	return (wc->method == METHOD_WGC) ? (wc->capture_winrt ? wc->exports.winrt_capture_width(wc->capture_winrt) : 0)
+					    : wc->capture.width;
 }
 
 static uint32_t wc_height(void *data)
@@ -425,7 +489,8 @@ static uint32_t wc_height(void *data)
 	if (!window_normal(wc))
 		return 0;
 
-	return (wc->method == METHOD_WGC) ? wc->exports.winrt_capture_height(wc->capture_winrt) : wc->capture.height;
+	return (wc->method == METHOD_WGC) ? (wc->capture_winrt ? wc->exports.winrt_capture_height(wc->capture_winrt) : 0)
+					    : wc->capture.height;
 }
 
 static void wc_defaults(obs_data_t *defaults)
@@ -566,6 +631,15 @@ static obs_properties_t *wc_properties(void *data)
 	return ppts;
 }
 
+static obs_properties_t *wc_temporary_properties(void *data)
+{
+	UNUSED_PARAMETER(data);
+	obs_properties_t *props = obs_properties_create();
+	obs_properties_add_text(props, "temporary_help", obs_module_text("TemporaryWindowCapture.Help"),
+				OBS_TEXT_INFO);
+	return props;
+}
+
 static void wc_hide(void *data)
 {
 	struct window_capture *wc = data;
@@ -593,6 +667,44 @@ static void wc_tick(void *data, float seconds)
 	struct window_capture *wc = data;
 	RECT rect;
 	bool reset_capture = false;
+	if (wc->temporary) {
+		HWND next_window = NULL;
+		enum window_capture_method next_method = METHOD_AUTO;
+		DWORD next_process = 0;
+		DWORD next_thread = 0;
+		pthread_mutex_lock(&wc->update_mutex);
+		const bool bind = wc->pending_bind;
+		if (bind) {
+			next_window = wc->pending_window;
+			next_method = wc->pending_method;
+			next_process = wc->pending_process;
+			next_thread = wc->pending_thread;
+			wc->pending_bind = false;
+		}
+		pthread_mutex_unlock(&wc->update_mutex);
+		if (bind) {
+			wc_hide(wc);
+			if (wc->capture.valid)
+				dc_capture_free(&wc->capture);
+			force_reset(wc);
+			wc->window = IsWindow(next_window) ? next_window : NULL;
+			wc->method = next_method;
+			wc->target_process = next_process;
+			wc->target_thread = next_thread;
+			reset_capture = wc->window != NULL;
+		}
+		if (!temporary_window_valid(wc)) {
+			if (wc->window) {
+				wc_hide(wc);
+				if (wc->capture.valid)
+					dc_capture_free(&wc->capture);
+				wc->window = NULL;
+			}
+			wc->target_process = 0;
+			wc->target_thread = 0;
+			return;
+		}
+	}
 
 	if (!obs_source_showing(wc->source))
 		return;
@@ -840,6 +952,26 @@ struct obs_source_info window_capture_info = {
 	.get_height = wc_height,
 	.get_defaults = wc_defaults,
 	.get_properties = wc_properties,
+	.enum_active_sources = wc_child_enum,
+	.icon_type = OBS_ICON_TYPE_WINDOW_CAPTURE,
+	.video_get_color_space = wc_get_color_space,
+};
+
+struct obs_source_info temporary_window_capture_info = {
+	.id = "temporary_window_capture",
+	.type = OBS_SOURCE_TYPE_INPUT,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_SRGB,
+	.get_name = wc_temporary_getname,
+	.create = wc_create,
+	.destroy = wc_destroy,
+	.update = wc_update,
+	.video_render = wc_render,
+	.hide = wc_hide,
+	.video_tick = wc_tick,
+	.get_width = wc_width,
+	.get_height = wc_height,
+	.get_defaults = wc_defaults,
+	.get_properties = wc_temporary_properties,
 	.enum_active_sources = wc_child_enum,
 	.icon_type = OBS_ICON_TYPE_WINDOW_CAPTURE,
 	.video_get_color_space = wc_get_color_space,
