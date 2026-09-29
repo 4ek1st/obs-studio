@@ -49,6 +49,10 @@ void runIntegrationChecks()
 	if (QCoreApplication::arguments().contains(QStringLiteral("--webview2-dock-tabs-test"))) {
 		runDockTabsChecks(check, [this, fixture, check] {
 			runDockTabDetachChecks(check, [this, fixture] {
+				runMultiAxisDockChecks([fixture](bool passed, const char *name) {
+					fixture->checks.append(QJsonObject{{"name", QString::fromUtf8(name)}, {"passed", passed}});
+					blog(passed ? LOG_INFO : LOG_ERROR, "[WebView2 test] %s: %s", passed ? "PASS" : "FAIL", name);
+				}, [this, fixture] {
 				runFloatingGroupChromeChecks([fixture](bool passed, const char *name) {
 					fixture->checks.append(QJsonObject{{"name", QString::fromUtf8(name)}, {"passed", passed}});
 					blog(passed ? LOG_INFO : LOG_ERROR, "[WebView2 test] %s: %s", passed ? "PASS" : "FAIL", name);
@@ -61,6 +65,7 @@ void runIntegrationChecks()
 					if (report.open(QIODevice::WriteOnly)) report.write(QJsonDocument(fixture->checks).toJson());
 					config_set_bool(obs_frontend_get_user_config(), "General", "ConfirmOnExit", false);
 					QTimer::singleShot(0, main, &QWidget::close);
+				});
 				});
 				});
 			});

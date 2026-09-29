@@ -131,6 +131,103 @@ void runDockTabsChecks(std::function<void(bool, const char *)> check, std::funct
     });
 }
 
+void runMultiAxisDockChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
+{
+    auto *scenes = main->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
+    auto *sources = main->findChild<QDockWidget *>(QStringLiteral("sourcesDock"));
+    auto *mixer = main->findChild<QDockWidget *>(QStringLiteral("mixerDock"));
+    auto *transitions = main->findChild<QDockWidget *>(QStringLiteral("transitionsDock"));
+    auto *controls = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
+    auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
+    if (!scenes || !sources || !mixer || !transitions || !controls || !lock) {
+        check(false, "Five movable native docks are available for multi-axis layout");
+        done();
+        return;
+    }
+    const auto original = main->saveState();
+    const bool wasLocked = lock->isChecked();
+    lock->setChecked(false);
+    main->showNormal();
+    main->resize(1600, 1000);
+    main->addDockWidget(Qt::RightDockWidgetArea, scenes);
+    main->addDockWidget(Qt::RightDockWidgetArea, sources);
+    main->addDockWidget(Qt::RightDockWidgetArea, mixer);
+    main->addDockWidget(Qt::RightDockWidgetArea, transitions);
+    main->addDockWidget(Qt::RightDockWidgetArea, controls);
+    main->splitDockWidget(scenes, sources, Qt::Horizontal);
+    main->splitDockWidget(sources, transitions, Qt::Horizontal);
+    main->splitDockWidget(scenes, mixer, Qt::Vertical);
+    main->splitDockWidget(mixer, controls, Qt::Vertical);
+    for (auto *dock : {scenes, sources, mixer, transitions, controls}) dock->show();
+    QTimer::singleShot(220, this, [this, scenes = QPointer<QDockWidget>(scenes),
+        sources = QPointer<QDockWidget>(sources), mixer = QPointer<QDockWidget>(mixer),
+        transitions = QPointer<QDockWidget>(transitions),
+        controls = QPointer<QDockWidget>(controls), lock = QPointer<QAction>(lock),
+        original, wasLocked, check, done] {
+        auto finish = [this, original, wasLocked, lock, done] {
+            main->restoreState(original);
+            if (lock) lock->setChecked(wasLocked);
+            done();
+        };
+        if (!scenes || !sources || !mixer || !transitions || !controls) {
+            check(false, "Multi-axis test docks survive layout changes");
+            finish();
+            return;
+        }
+        check(scenes->x() < sources->x() && sources->x() < transitions->x() &&
+              scenes->y() < mixer->y() && mixer->y() < controls->y() &&
+              main->dockWidgetArea(scenes) == Qt::RightDockWidgetArea &&
+              main->dockOptions().testFlag(QMainWindow::AllowNestedDocks),
+              "Native layout supports three columns and three rows at once");
+        const auto artifacts = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
+        if (!artifacts.isEmpty())
+            main->grab().save(QDir(artifacts).filePath(QStringLiteral("dock-three-by-three.png")));
+        const auto multiAxisState = main->saveState();
+        main->addDockWidget(Qt::RightDockWidgetArea, transitions);
+        const bool restored = main->restoreState(multiAxisState);
+        QCoreApplication::processEvents();
+        check(restored && scenes->x() < sources->x() && sources->x() < transitions->x() &&
+              scenes->y() < mixer->y() && mixer->y() < controls->y(),
+              "Saving and restoring layout preserves three columns and rows");
+        controls->setFloating(true);
+        controls->resize(270, 220);
+        controls->show();
+        QTimer::singleShot(180, this, [this, scenes, sources, mixer, transitions,
+            controls, check, finish] {
+            auto *title = controls ? controls->titleBarWidget() : nullptr;
+            if (!title || !sources) {
+                check(false, "Floating controls have a draggable title");
+                finish();
+                return;
+            }
+            auto mouse = [](QWidget *widget, QEvent::Type type, QPoint global,
+                            Qt::MouseButton button, Qt::MouseButtons buttons) {
+                const QPointF local = widget->mapFromGlobal(global);
+                QMouseEvent event(type, local, local, QPointF(global), button, buttons, Qt::NoModifier);
+                QApplication::sendEvent(widget, &event);
+            };
+            const QPoint start = title->mapToGlobal(QPoint(20, title->height() / 2));
+            const QPoint target = sources->mapToGlobal(QPoint(sources->width() / 2,
+                                                              sources->height() - 8));
+            mouse(title, QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+            mouse(title, QEvent::MouseMove, start + QPoint(70, 40), Qt::NoButton, Qt::LeftButton);
+            mouse(title, QEvent::MouseMove, target, Qt::NoButton, Qt::LeftButton);
+            auto *indicator = main->findChild<QWidget *>(QStringLiteral("qt_rubberband"));
+            check(indicator && indicator->isVisible(),
+                  "Dragging to a dock edge shows a native split target");
+            mouse(title, QEvent::MouseButtonRelease, target, Qt::LeftButton, Qt::NoButton);
+            QTimer::singleShot(200, this, [this, scenes, sources, mixer, transitions,
+                controls, check, finish] {
+                check(scenes && sources && mixer && transitions && controls && !controls->isFloating() &&
+                      controls->y() > sources->y() &&
+                      !main->tabifiedDockWidgets(sources).contains(controls),
+                      "Dropping at the lower edge creates another dock row");
+                finish();
+            });
+        });
+    });
+}
+
 void runDockTabDetachChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
 {
     auto *scenes = main->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
@@ -232,7 +329,8 @@ void runFloatingGroupChromeChecks(std::function<void(bool, const char *)> check,
             mouse(title, QEvent::MouseMove, outside, Qt::NoButton, Qt::LeftButton);
             mouse(title, QEvent::MouseButtonRelease, outside, Qt::LeftButton, Qt::NoButton);
         }
-        QTimer::singleShot(220, this, [this, scenes, controls, lock, original, wasLocked, check, done, mouse] {
+        QTimer::singleShot(220, this, [this, scenes, controls,
+            lock, original, wasLocked, check, done, mouse] {
             QPointer<QWidget> group;
             for (auto *widget : QApplication::topLevelWidgets())
                 if (widget->inherits("QDockWidgetGroupWindow") && widget->parentWidget() == main &&
@@ -240,12 +338,33 @@ void runFloatingGroupChromeChecks(std::function<void(bool, const char *)> check,
             check(group && group->isVisible() && group->findChildren<QDockWidget *>().contains(scenes),
                   "Dragging a tabbed panel title creates a floating group with both panels");
             if (group) {
-                check(group->styleSheet().contains(QStringLiteral("border: 1px solid palette(window)")) &&
+                const auto hwnd = reinterpret_cast<HWND>(group->winId());
+                COLORREF borderColor = 0;
+                using GetAttribute = HRESULT(WINAPI *)(HWND, DWORD, PVOID, DWORD);
+                const auto getAttribute = reinterpret_cast<GetAttribute>(
+                    QLibrary::resolve(QStringLiteral("dwmapi"), "DwmGetWindowAttribute"));
+                const HRESULT borderResult = getAttribute ? getAttribute(hwnd, DWMWA_BORDER_COLOR,
+                    &borderColor, sizeof(borderColor)) : E_NOTIMPL;
+                blog(LOG_INFO, "[WebView2 group frame] style=%llx exStyle=%llx borderResult=%lx borderColor=%06lx palette=%s",
+                    static_cast<unsigned long long>(GetWindowLongPtrW(hwnd, GWL_STYLE)),
+                    static_cast<unsigned long long>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)),
+                    static_cast<unsigned long>(borderResult), static_cast<unsigned long>(borderColor),
+                    group->palette().color(QPalette::Window).name().toUtf8().constData());
+                check(group->styleSheet().contains(QStringLiteral("border: 1px solid %1")
+                      .arg(themeEdgeColor(group->palette()).name())) &&
                       group->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, group) == 1,
-                      "Floating group uses a flat theme frame instead of the bright Qt bevel");
+                      "Floating group uses a visible theme frame instead of the bright Qt bevel");
                 const auto artifacts = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
-                if (!artifacts.isEmpty())
+                if (!artifacts.isEmpty()) {
                     group->grab().save(QDir(artifacts).filePath(QStringLiteral("frame-floating-group.png")));
+                    group->raise();
+                    group->activateWindow();
+                    QCoreApplication::processEvents();
+                    const QRect frame = group->frameGeometry();
+                    if (auto *screen = group->screen())
+                        screen->grabWindow(0, frame.x(), frame.y(), frame.width(), frame.height())
+                            .save(QDir(artifacts).filePath(QStringLiteral("frame-floating-group-native.png")));
+                }
                 QTabBar *tabs = nullptr;
                 for (auto *bar : group->findChildren<QTabBar *>())
                     if (bar->isVisible()) { tabs = bar; break; }
@@ -316,11 +435,11 @@ void runWindowFrameChecks(std::function<void(bool, const char *)> check, std::fu
         QCoreApplication::processEvents();
         return captureHandle(reinterpret_cast<HWND>(window->winId()), name);
     };
-    auto matchesPalette = [](const QImage &frame, const QWidget *window) {
+    auto matchesPalette = [](const QImage &frame, const QWidget *window,
+                             QPalette::ColorRole role = QPalette::Window) {
         if (frame.isNull() || frame.width() < 16 || frame.height() < 16 || !window) return false;
-        const QColor expected = window->palette().color(QPalette::Window);
+        const QColor expected = window->palette().color(role);
         const QColor actual = frame.pixelColor(frame.width() / 2, 5);
-        // Floating docks draw their own Qt title with a slightly darker style color.
         return std::abs(actual.red() - expected.red()) <= 12 &&
                std::abs(actual.green() - expected.green()) <= 12 &&
                std::abs(actual.blue() - expected.blue()) <= 12;
@@ -366,7 +485,14 @@ void runWindowFrameChecks(std::function<void(bool, const char *)> check, std::fu
     dock->show();
     QCoreApplication::processEvents();
     const auto dockFrame = captureFrame(dock, QStringLiteral("frame-floating-dock.png"));
-    check(matchesPalette(dockFrame, dock), "Floating WebView2 panels also use their Qt theme for the window frame");
+    const QImage titleImage = dock->titleBarWidget() ? dock->titleBarWidget()->grab().toImage() : QImage();
+    const QColor titleColor = titleImage.isNull() ? QColor() : titleImage.pixelColor(titleImage.width() / 2, 5);
+    const QColor frameColor = dockFrame.isNull() ? QColor() : dockFrame.pixelColor(dockFrame.width() / 2, 5);
+    check(titleColor.isValid() && frameColor.isValid() &&
+          std::abs(titleColor.red() - frameColor.red()) <= 12 &&
+          std::abs(titleColor.green() - frameColor.green()) <= 12 &&
+          std::abs(titleColor.blue() - frameColor.blue()) <= 12,
+          "Floating WebView2 panels also use their Qt theme for the window frame");
     main->restoreState(original);
     lock->setChecked(wasLocked);
     done();
@@ -430,7 +556,7 @@ void runOverlayAndFloatingDockChecks(std::function<void(bool, const char *)> che
         {"args", QJsonObject{{"name", "controlsDock"}}}});
     lock->setChecked(true);
     auto *toggle = dock->titleBarWidget() ? dock->titleBarWidget()->findChild<QToolButton *>(QStringLiteral("obsWebView2DockToggle")) : nullptr;
-    check(toggle && !toggle->isEnabled(), "Native dock lock disables the custom Qt float and attach control");
+    check(!toggle, "Native dock title has no pin or attach control");
     execute({{"id", "dock-lock-test"}, {"command", "dock.detach"}, {"args", QJsonObject{{"name", "controlsDock"}}}});
     check(!lastTestReply.value("ok").toBool() && !dock->isFloating(),
           "Locked workspace rejects a core panel detach without changing its native dock state");

@@ -83,6 +83,7 @@
 #include <mutex>
 
 #ifdef OBS_WEBVIEW2_INTEGRATION_TESTS
+#include <QScreen>
 #include "../../test/webview2/audio-integration.inl"
 #include "../../test/webview2/dialog-integration.inl"
 #include "../../test/webview2/output-integration.inl"
@@ -94,20 +95,32 @@
 #endif
 
 namespace {
+QColor themeEdgeColor(const QPalette &palette)
+{
+    const QColor background = palette.color(QPalette::Window);
+    const QColor foreground = palette.color(QPalette::WindowText);
+    const auto channel = [](int backgroundValue, int foregroundValue) {
+        return (backgroundValue * 78 + foregroundValue * 22 + 50) / 100;
+    };
+    return QColor(channel(background.red(), foreground.red()),
+                  channel(background.green(), foreground.green()),
+                  channel(background.blue(), foreground.blue()));
+}
+
 class ThemeWindowFrames final : public QObject {
     using SetAttribute = HRESULT(WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
-    struct AppliedFrame { WId id; COLORREF caption; COLORREF text; BOOL dark; };
+    struct AppliedFrame { WId id; COLORREF caption; COLORREF border; COLORREF text; BOOL dark; };
     static inline ThemeWindowFrames *instance = nullptr;
     QHash<QWidget *, AppliedFrame> applied;
     HWINEVENTHOOK showHook = nullptr;
 
-    static bool setFrame(HWND hwnd, COLORREF caption, COLORREF text, BOOL dark, const char *name)
+    static bool setFrame(HWND hwnd, COLORREF caption, COLORREF border, COLORREF text, BOOL dark, const char *name)
     {
         static auto setAttribute = reinterpret_cast<SetAttribute>(QLibrary::resolve(QStringLiteral("dwmapi"), "DwmSetWindowAttribute"));
         if (!setAttribute) return false;
         const auto darkResult = setAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
         const auto captionResult = setAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
-        const auto borderResult = setAttribute(hwnd, DWMWA_BORDER_COLOR, &caption, sizeof(caption));
+        const auto borderResult = setAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
         const auto textResult = setAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
         if (FAILED(darkResult) || FAILED(captionResult) || FAILED(borderResult) || FAILED(textResult)) {
             blog(LOG_WARNING, "[WebView2] Theme frame attributes unavailable for %s: dark=%lx caption=%lx border=%lx text=%lx",
@@ -130,8 +143,10 @@ class ThemeWindowFrames final : public QObject {
         }
         const auto palette = qApp->palette();
         const QColor background = palette.color(QPalette::Window);
+        const QColor edge = themeEdgeColor(palette);
         const QColor foreground = palette.color(QPalette::WindowText);
         setFrame(hwnd, RGB(background.red(), background.green(), background.blue()),
+                 RGB(edge.red(), edge.green(), edge.blue()),
                  RGB(foreground.red(), foreground.green(), foreground.blue()),
                  background.lightness() < 128, "native application dialog");
     }
@@ -166,18 +181,20 @@ public:
         if (!id) return;
         const auto palette = window->palette();
         const QColor background = palette.color(QPalette::Window);
+        const QColor edge = themeEdgeColor(palette);
         const QColor foreground = palette.color(QPalette::WindowText);
         const COLORREF caption = RGB(background.red(), background.green(), background.blue());
+        const COLORREF border = RGB(edge.red(), edge.green(), edge.blue());
         const COLORREF text = RGB(foreground.red(), foreground.green(), foreground.blue());
         const BOOL dark = background.lightness() < 128;
         const auto previous = applied.constFind(window);
         if (previous != applied.cend() && previous->id == id && previous->caption == caption &&
-            previous->text == text && previous->dark == dark) return;
+            previous->border == border && previous->text == text && previous->dark == dark) return;
         const auto hwnd = reinterpret_cast<HWND>(id);
-        if (setFrame(hwnd, caption, text, dark, window->objectName().toUtf8().constData())) {
+        if (setFrame(hwnd, caption, border, text, dark, window->objectName().toUtf8().constData())) {
             if (previous == applied.cend())
                 connect(window, &QObject::destroyed, this, [this, window] { applied.remove(window); });
-            applied.insert(window, {id, caption, text, dark});
+            applied.insert(window, {id, caption, border, text, dark});
         }
     }
 
@@ -809,8 +826,9 @@ public:
 		}
 		// A combined dock should reveal both panel names beside its header.
 		// QMainWindow still owns native drag, tab switching and layout persistence.
-		// Qt requires GroupedDragging to unplug an individual tab by dragging it.
-		main->setDockOptions(main->dockOptions() | QMainWindow::GroupedDragging);
+		// Keep OBS's native split docking in both axes, with draggable tab groups.
+		main->setDockOptions(main->dockOptions() | QMainWindow::AllowNestedDocks |
+		                     QMainWindow::AllowTabbedDocks | QMainWindow::GroupedDragging);
 		main->setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
 		nativeCentral = main->takeCentralWidget();
 		if (nativeCentral) {

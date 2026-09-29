@@ -102,3 +102,10 @@ input[type=range]:hover:not(:disabled){filter:brightness(1.18)}
 .preview-trim-handle::before{content:"";position:absolute;top:0;bottom:0;left:6px;width:2px;background:var(--selected);opacity:0;transition:opacity 110ms ease}
 .preview-trim-handle:hover::before,.preview-trim-handle:focus-visible::before,.preview-trim-handle.dragging::before{opacity:1}
 .preview-trim-handle:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+
+/* Keep every dock and the central workspace legible in all OBS themes. */
+:root{--dock-edge:color-mix(in srgb,var(--bg) 78%,var(--text) 22%)}
+.preview-area,.panel{border:1px solid var(--dock-edge)}
+.native-dock-panel .panel{border:1px solid var(--dock-edge)}
+.panel h2,.toolbar{border-color:var(--dock-edge)}
+#context-bar{border-bottom:1px solid var(--dock-edge)}

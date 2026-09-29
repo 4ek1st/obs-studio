@@ -112,21 +112,12 @@ bool restoringWebDocks = false;
 class WebDockTitleBar final : public QWidget {
     QPointer<QDockWidget> dock;
     QLabel *title;
-    QToolButton *toggle;
     QToolButton *close;
-    QString dockText, floatText;
 
     void updateControls()
     {
         if (!dock) return;
         title->setText(dock->windowTitle());
-        const bool floating = dock->isFloating();
-        toggle->setText(floating ? dockText : floatText);
-        toggle->setToolTip(toggle->text());
-        toggle->setAccessibleName(toggle->text());
-        toggle->setToolButtonStyle(floating ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
-        toggle->setIcon(style()->standardIcon(QStyle::SP_TitleBarNormalButton));
-        toggle->setEnabled(dock->features().testFlag(QDockWidget::DockWidgetFloatable));
         close->setVisible(dock->features().testFlag(QDockWidget::DockWidgetClosable));
         updateGeometry();
         update();
@@ -139,16 +130,13 @@ protected:
     void paintEvent(QPaintEvent *) override
     {
         if (!dock) return;
-        QStyleOptionDockWidget option;
-        option.initFrom(dock);
-        option.rect = rect();
-        option.movable = dock->features().testFlag(QDockWidget::DockWidgetMovable);
         QPainter painter(this);
-        style()->drawControl(QStyle::CE_DockWidgetTitle, &option, &painter, this);
+        painter.fillRect(rect(), palette().color(QPalette::Button));
+        painter.setPen(themeEdgeColor(palette()));
+        painter.drawRect(rect().adjusted(0, 0, -1, -1));
     }
 public:
-    WebDockTitleBar(QDockWidget *parent, const QString &attachText, const QString &detachText)
-        : QWidget(parent), dock(parent), dockText(attachText), floatText(detachText)
+    explicit WebDockTitleBar(QDockWidget *parent) : QWidget(parent), dock(parent)
     {
         setObjectName(QStringLiteral("obsWebView2DockTitleBar"));
         auto *layout = new QHBoxLayout(this);
@@ -158,10 +146,6 @@ public:
         title->setAttribute(Qt::WA_TransparentForMouseEvents);
         title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         layout->addWidget(title, 1);
-        toggle = new QToolButton(this);
-        toggle->setObjectName(QStringLiteral("obsWebView2DockToggle"));
-        toggle->setAutoRaise(true);
-        layout->addWidget(toggle);
         close = new QToolButton(this);
         close->setObjectName(QStringLiteral("obsWebView2DockClose"));
         close->setAutoRaise(true);
@@ -169,12 +153,6 @@ public:
         close->setToolTip(QTStr("Close"));
         close->setAccessibleName(close->toolTip());
         layout->addWidget(close);
-        connect(toggle, &QToolButton::clicked, this, [this] {
-            if (!dock || !dock->features().testFlag(QDockWidget::DockWidgetFloatable)) return;
-            dock->setFloating(!dock->isFloating());
-            dock->show();
-            dock->raise();
-        });
         connect(close, &QToolButton::clicked, this, [this] {
             if (dock && dock->features().testFlag(QDockWidget::DockWidgetClosable)) dock->close();
         });
@@ -186,7 +164,7 @@ public:
     QSize minimumSizeHint() const override
     {
         const auto hint = layout()->minimumSize();
-        return {hint.width() + 40, std::max(hint.height(), fontMetrics().height() + 8)};
+        return {hint.width() + 8, std::max(hint.height(), fontMetrics().height() + 8)};
     }
     QSize sizeHint() const override { return minimumSizeHint(); }
 };
@@ -200,7 +178,7 @@ QHash<QDockWidget *, WebDockChrome> webDockChrome;
 void installWebDockChrome(QDockWidget *dock)
 {
     if (webDockChrome.contains(dock)) return;
-    auto *title = new WebDockTitleBar(dock, QTStr("WebView2.Dock"), QTStr("WebView2.Float"));
+    auto *title = new WebDockTitleBar(dock);
     const QPointer<QWidget> original = dock->titleBarWidget();
     webDockChrome.insert(dock, {original, title});
     if (original) original->hide();

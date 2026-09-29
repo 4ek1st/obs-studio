@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QColor>
 #include <QCursor>
 #include <QDockWidget>
 #include <QMainWindow>
@@ -26,12 +27,21 @@ QWidget *FloatingDockGroupChrome::groupFor(QObject *object) const
 
 void FloatingDockGroupChrome::styleGroup(QWidget *group)
 {
-	if (!group || originalStyles.contains(group)) return;
-	originalStyles.insert(group, group->styleSheet());
-	connect(group, &QObject::destroyed, this, [this, group] { originalStyles.remove(group); });
+	if (!group) return;
+	if (!originalStyles.contains(group)) {
+		originalStyles.insert(group, group->styleSheet());
+		connect(group, &QObject::destroyed, this, [this, group] { originalStyles.remove(group); });
+	}
+	const QColor background = group->palette().color(QPalette::Window);
+	const QColor foreground = group->palette().color(QPalette::WindowText);
+	const auto channel = [](int base, int text) { return (base * 78 + text * 22 + 50) / 100; };
+	const QColor edge(channel(background.red(), foreground.red()),
+	                  channel(background.green(), foreground.green()),
+	                  channel(background.blue(), foreground.blue()));
 	// Keep Qt's edge resize area while replacing its bright beveled group frame.
-	group->setStyleSheet(group->styleSheet() + QStringLiteral(
-		"\nQDockWidgetGroupWindow { background-color: palette(window); border: 1px solid palette(window); }"));
+	const QString style = originalStyles.value(group) + QStringLiteral(
+		"\nQDockWidgetGroupWindow { background-color: palette(window); border: 1px solid %1; }").arg(edge.name());
+	if (group->styleSheet() != style) group->setStyleSheet(style);
 }
 
 QTabBar *FloatingDockGroupChrome::tabsFor(QWidget *group) const
@@ -279,7 +289,8 @@ bool FloatingDockGroupChrome::eventFilter(QObject *object, QEvent *event)
 	auto *group = groupFor(object);
 	if (!group || !main || !main->property("webview2NativeDocking").toBool())
 		return false;
-	if (object == group && event->type() == QEvent::Show) styleGroup(group);
+	if (object == group && (event->type() == QEvent::Show || event->type() == QEvent::PaletteChange))
+		styleGroup(group);
 	if (event->type() != QEvent::MouseButtonPress) return false;
 	auto *grip = qobject_cast<QWidget *>(object);
 	auto *mouse = static_cast<QMouseEvent *>(event);
