@@ -31,9 +31,28 @@ void runIntegrationChecks()
 	              main->dockOptions().testFlag(QMainWindow::AllowNestedDocks) &&
 	              main->dockOptions().testFlag(QMainWindow::AllowTabbedDocks),
 	      "Original OBS shell retains nested and tabbed native docking");
+	const auto localizedState = snapshot();
+	const auto localizedLabels = localizedState.value("labels").toObject();
+	check(localizedState.value("locale").toString() == QString::fromUtf8(App()->GetLocale()) &&
+	              localizedLabels.value("Basic.Main.Scenes").toString() == QTStr("Basic.Main.Scenes") &&
+	              localizedLabels.value("WebView2.EmptyAudio").toString() == QTStr("WebView2.EmptyAudio") &&
+	              !localizedLabels.value("WebView2.EmptyAudio").toString().isEmpty(),
+	      "WebView2 receives the selected OBS locale with native and extension translations");
+	const auto artifactDirectory = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
+	if (!artifactDirectory.isEmpty()) {
+		QDir().mkpath(artifactDirectory);
+		QFile localeReport(QDir(artifactDirectory).filePath("localization-snapshot.json"));
+		if (localeReport.open(QIODevice::WriteOnly))
+			localeReport.write(QJsonDocument(QJsonObject{{"locale", localizedState.value("locale")},
+				{"labels", localizedLabels}}).toJson());
+	}
 	if (QCoreApplication::arguments().contains(QStringLiteral("--webview2-dock-tabs-test"))) {
 		runDockTabsChecks(check, [this, fixture, check] {
 			runDockTabDetachChecks(check, [this, fixture] {
+				runFloatingGroupChromeChecks([fixture](bool passed, const char *name) {
+					fixture->checks.append(QJsonObject{{"name", QString::fromUtf8(name)}, {"passed", passed}});
+					blog(passed ? LOG_INFO : LOG_ERROR, "[WebView2 test] %s: %s", passed ? "PASS" : "FAIL", name);
+				}, [this, fixture] {
 				runWindowFrameChecks([fixture](bool passed, const char *name) {
 					fixture->checks.append(QJsonObject{{"name", QString::fromUtf8(name)}, {"passed", passed}});
 					blog(passed ? LOG_INFO : LOG_ERROR, "[WebView2 test] %s: %s", passed ? "PASS" : "FAIL", name);
@@ -42,6 +61,7 @@ void runIntegrationChecks()
 					if (report.open(QIODevice::WriteOnly)) report.write(QJsonDocument(fixture->checks).toJson());
 					config_set_bool(obs_frontend_get_user_config(), "General", "ConfirmOnExit", false);
 					QTimer::singleShot(0, main, &QWidget::close);
+				});
 				});
 			});
 		});

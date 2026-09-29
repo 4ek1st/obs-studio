@@ -22,7 +22,8 @@
   state.workspace.actionSceneGridMode=new URLSearchParams(location.search).has("sceneGrid");
   state.sceneGrid={width:154,height:24};
   if(new URLSearchParams(location.search).has("sourceGroup"))state.sources.push({id:"3",uuid:"group-1",name:"Группа",group:true,collapsed:true,visible:true,locked:false,selected:false});
-  state.previewControls={enabled:!new URLSearchParams(location.search).has("previewDisabled"),index:0,percent:"58%",
+  state.previewControls={enabled:!new URLSearchParams(location.search).has("previewDisabled"),index:0,fixed:false,percent:"58%",
+    canvasWidth:1920,canvasHeight:1080,scale:.58,pixelRatio:1,hostWidth:innerWidth,hostHeight:innerHeight,
     options:[{index:0,text:"По размеру окна"},{index:1,text:"Холст (1920x1080)"},{index:2,text:"Вывод (1280x720)"}],
     enableText:"Включить предпросмотр",previewXScrollBar:{min:0,max:0,value:0,page:100},previewYScrollBar:{min:0,max:0,value:0,page:100}};
   state.mixerToolbar={hidden:{id:"mixer-hidden",text:"Скрыто: 0",enabled:false,checked:false},optionsText:"Параметры",layoutAction:"actionMixerToolbarToggleLayout"};
@@ -53,7 +54,7 @@
       }
       if(message.command==="preview.enable")state.previewControls.enabled=true;
       if(message.command==="preview.scale"){
-        const c=state.previewControls;c.index=message.args.index;c.percent=c.index===0?"58%":c.index===1?"100%":"66%";
+        const c=state.previewControls;c.index=message.args.index;c.fixed=c.index!==0;c.percent=c.index===0?"58%":c.index===1?"100%":"66%";
         c.previewXScrollBar={min:c.index?-500:0,max:c.index?500:0,value:0,page:1000};
         c.previewYScrollBar={min:c.index?-300:0,max:c.index?300:0,value:0,page:600};
       }
@@ -114,4 +115,9 @@
     },
   };
   window.addEventListener("load", publish);
+  window.addEventListener("resize", () => {
+    state.previewControls.hostWidth=innerWidth;
+    state.previewControls.hostHeight=innerHeight;
+    publish();
+  });
 })();

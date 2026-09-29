@@ -13,6 +13,8 @@ let nativeSize = { width: 1, height: 1 };
 let viewportScale = { x: 1, y: 1 };
 let fontRevision = 0;
 let acceptingDrops = false;
+let labels = {};
+const tr = (key, fallback) => labels[key] || fallback;
 
 function applyViewportScale() {
   viewportScale = { x: innerWidth / nativeSize.width, y: innerHeight / nativeSize.height };
@@ -40,7 +42,7 @@ function applyTheme(theme, style = document.documentElement.style) {
 
 function showError(error) {
   // The native host provides public, value-free diagnostics; never print field contents.
-  errorBox.textContent = error?.message || "The control could not be updated.";
+  errorBox.textContent = error?.message || tr("WebView2.Dialog.UpdateFailed", "The control could not be updated.");
   errorBox.hidden = false;
   clearTimeout(clearError);
   clearError = setTimeout(() => { errorBox.hidden = true; }, 5000);
@@ -182,7 +184,7 @@ function createScrollbar(onValue, onFinish = () => {}) {
   const control = element("div", "scrollbar");
   control.tabIndex = 0;
   control.setAttribute("role", "scrollbar");
-  control.setAttribute("aria-label", "Scroll");
+  control.setAttribute("aria-label", tr("WebView2.Dialog.Scroll", "Scroll"));
   control.append(element("div", "scrollbar-thumb"));
   let drag = null;
   const set = value => {
@@ -377,7 +379,7 @@ function updateItems(control, data) {
         row.prepend(expand);
       }
       expand.textContent = item.expanded ? "▾" : "▸";
-      expand.setAttribute("aria-label", item.expanded ? "Collapse" : "Expand");
+      expand.setAttribute("aria-label", item.expanded ? tr("WebView2.Dialog.Collapse", "Collapse") : tr("WebView2.Dialog.Expand", "Expand"));
     } else expand?.remove();
     let check = row.querySelector("input");
     if (item.checkable) {
@@ -449,10 +451,11 @@ function updateControl(control, data) {
     control.classList.toggle("default", data.default);
     let arrow = control.querySelector(".menu-arrow");
     if (data.menu && !arrow) {
-      arrow = element("span", "menu-arrow"); arrow.textContent = "▾"; arrow.title = "Open menu (Alt+Down)";
+      arrow = element("span", "menu-arrow"); arrow.textContent = "▾"; arrow.title = tr("WebView2.Dialog.OpenMenu", "Open menu (Alt+Down)");
       arrow.addEventListener("click", event => { event.stopPropagation(); request("dialog.menu", { id: data.id }); });
       control.append(arrow);
     } else if (!data.menu) arrow?.remove();
+    if (data.menu && arrow) arrow.title = tr("WebView2.Dialog.OpenMenu", "Open menu (Alt+Down)");
     if (data.menu) control.setAttribute("aria-haspopup", "menu"); else control.removeAttribute("aria-haspopup");
   } else if (data.type === "check" || data.type === "radio") {
     const input = control.querySelector("input");
@@ -572,13 +575,17 @@ function updateControl(control, data) {
 }
 
 function render(state) {
+  labels = state.labels || {};
+  document.documentElement.lang = (state.locale || "en-US").replaceAll("_", "-");
+  for (const scrollbar of root.querySelectorAll?.(".scrollbar") || [])
+    scrollbar.setAttribute("aria-label", tr("WebView2.Dialog.Scroll", "Scroll"));
   acceptingDrops = !!state.acceptDrops && !!state.enabled && !state.closed;
   nativeSize = { width: Math.max(1, state.width || 1), height: Math.max(1, state.height || 1) };
   applyViewportScale();
   applyTheme(state.theme);
   scrollAreas = (state.nodes ?? []).filter(node => node.type === "scrollArea");
   document.title = state.title || "OBS Studio";
-  root.setAttribute("aria-label", state.title || "OBS dialog");
+  root.setAttribute("aria-label", state.title || tr("WebView2.Dialog", "OBS dialog"));
   const present = new Set();
   const created = new Set();
   let layer = 0;

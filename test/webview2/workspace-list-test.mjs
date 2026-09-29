@@ -38,7 +38,7 @@ function fixture(sources=true) {
   const state={currentScene:"s",sources:sourceRows,scenes,workspace:{}};
   for(const id of ["sources","scenes","rename-dialog","rename-title","rename-value"])elements.set(id,new Element());
   const button=(_text,callback)=>{const node=new Element("button");node.addEventListener("click",callback);return node;};
-  const context={document,state,dragged:null,renameTarget:null,keyOf:row=>[row.owner??"",row.id,row.uuid].join("/"),$:(id)=>elements.get(id),
+  const context={document,state,dragged:null,renameTarget:null,tr:(_key,fallback)=>fallback,keyOf:row=>[row.owner??"",row.id,row.uuid].join("/"),$:(id)=>elements.get(id),
     sourceArgs:row=>({...row,scene:state.currentScene}),request:async(command,args)=>{calls.push([command,args]);return {};},closeMenus(){},scheduleBounds(){},
     icon:()=>new Element("svg"),iconButton:(_symbol,text,callback)=>button(text,callback),button,actionsByName:new Map(),
     invokeName:name=>calls.push(["invoke",name]),showContext:()=>calls.push(["custom.menu"])};

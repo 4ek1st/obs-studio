@@ -92,3 +92,13 @@ button[aria-pressed=true]:hover:not(:disabled),#controls button.active:hover:not
 select:hover:not(:disabled),input:not([type=range]):hover:not(:disabled){border-color:color-mix(in srgb,var(--focus) 60%,var(--line) 40%)}
 input[type=range]:hover:not(:disabled){filter:brightness(1.18)}
 @media(prefers-reduced-motion:reduce){button:not(:disabled),.row,select:not(:disabled),input:not(:disabled){transition:none}}
+
+/* The side grips narrow only the preview viewport. OBS keeps the scene at its
+   current scale; space outside the viewport becomes workspace background. */
+.preview-area{position:relative;padding-left:calc(8px + var(--preview-trim-left,0px));padding-right:calc(8px + var(--preview-trim-right,0px))}
+.preview-trim-handle{position:absolute;top:27px;bottom:6px;width:14px;z-index:2;cursor:ew-resize;touch-action:none}
+#preview-trim-left{left:calc(8px + var(--preview-trim-left,0px) - 7px)}
+#preview-trim-right{right:calc(8px + var(--preview-trim-right,0px) - 7px)}
+.preview-trim-handle::before{content:"";position:absolute;top:0;bottom:0;left:6px;width:2px;background:var(--selected);opacity:0;transition:opacity 110ms ease}
+.preview-trim-handle:hover::before,.preview-trim-handle:focus-visible::before,.preview-trim-handle.dragging::before{opacity:1}
+.preview-trim-handle:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}

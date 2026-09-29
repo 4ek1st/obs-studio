@@ -18,6 +18,7 @@
 #include "OBSBasic.hpp"
 
 #include <algorithm>
+#include <unordered_map>
 
 #include <components/MenuButton.hpp>
 #include <dialogs/NameDialog.hpp>
@@ -26,7 +27,9 @@
 
 #include <qt-wrappers.hpp>
 #include <slider-ignorewheel.hpp>
+#include <util/text-lookup.h>
 
+#include <QDir>
 #include <QToolTip>
 #include <QWidgetAction>
 
@@ -174,6 +177,34 @@ void OBSBasic::CreateDefaultQuickTransitions()
 	quickTransitions.emplace_back(fadeTransition, 300, quickTransitionIdCounter++, true);
 }
 
+// Older scene collections identify built-in quick transitions by their
+// translated display name. Resolve those names across the bundled OBS locales
+// when a collection is opened after changing the application language.
+static const char *LegacyDefaultTransitionType(const char *name)
+{
+	static const auto names = [] {
+		std::unordered_map<std::string, const char *> result;
+		auto *module = obs_get_module("obs-transitions");
+		if (!module || !obs_get_module_data_path(module)) return result;
+		QDir locales(QString::fromUtf8(obs_get_module_data_path(module)));
+		if (!locales.cd(QStringLiteral("locale"))) return result;
+		for (const auto &file : locales.entryInfoList({QStringLiteral("*.ini")}, QDir::Files)) {
+			auto *lookup = text_lookup_create(file.absoluteFilePath().toUtf8().constData());
+			if (!lookup) continue;
+			for (const auto &[key, type] : {std::pair{"CutTransition", "cut_transition"},
+						       std::pair{"FadeTransition", "fade_transition"}}) {
+				const char *translated = nullptr;
+				if (text_lookup_getstr(lookup, key, &translated) && translated && *translated)
+					result.emplace(translated, type);
+			}
+			text_lookup_destroy(lookup);
+		}
+		return result;
+	}();
+	auto match = names.find(name);
+	return match == names.end() ? nullptr : match->second;
+}
+
 void OBSBasic::LoadQuickTransitions(obs_data_array_t *array)
 {
 	size_t count = obs_data_array_count(array);
@@ -184,12 +215,23 @@ void OBSBasic::LoadQuickTransitions(obs_data_array_t *array)
 		OBSDataAutoRelease data = obs_data_array_item(array, i);
 		OBSDataArrayAutoRelease hotkeys = obs_data_get_array(data, "hotkeys");
 		const char *name = obs_data_get_string(data, "name");
+		const char *type = obs_data_get_string(data, "type");
 		int duration = obs_data_get_int(data, "duration");
 		int id = obs_data_get_int(data, "id");
 		bool toBlack = obs_data_get_bool(data, "fade_to_black");
 
 		if (id) {
 			obs_source_t *source = FindTransition(name);
+			if (!source) {
+				if (!type || !*type) type = LegacyDefaultTransitionType(name);
+				if (type && *type)
+					for (const auto &[uuid, candidate] : transitions)
+						if (candidate && !obs_source_configurable(candidate.Get()) &&
+						    strcmp(obs_obj_get_id(candidate.Get()), type) == 0) {
+							source = candidate.Get();
+							break;
+						}
+			}
 			if (source) {
 				quickTransitions.emplace_back(source, duration, id, toBlack);
 
@@ -214,6 +256,7 @@ obs_data_array_t *OBSBasic::SaveQuickTransitions()
 		OBSDataArrayAutoRelease hotkeys = obs_hotkey_save(qt.hotkey);
 
 		obs_data_set_string(data, "name", obs_source_get_name(qt.source));
+		obs_data_set_string(data, "type", obs_obj_get_id(qt.source));
 		obs_data_set_int(data, "duration", qt.duration);
 		obs_data_set_array(data, "hotkeys", hotkeys);
 		obs_data_set_int(data, "id", qt.id);

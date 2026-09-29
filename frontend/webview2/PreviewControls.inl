@@ -26,6 +26,15 @@ void addPreviewState(QJsonObject &state)
     }
     auto *editor = qobject_cast<OBSBasicPreview *>(preview);
     controls.insert("fixed", editor && editor->IsFixedScaling());
+    if (editor) {
+        controls.insert("scale", editor->GetScalingAmount());
+        controls.insert("pixelRatio", editor->devicePixelRatioF());
+    }
+    obs_video_info video{};
+    if (obs_get_video_info(&video)) {
+        controls.insert("canvasWidth", int(video.base_width));
+        controls.insert("canvasHeight", int(video.base_height));
+    }
     for (const auto *name : {"previewXScrollBar", "previewYScrollBar"}) {
         if (auto *bar = main->findChild<QScrollBar *>(QLatin1String(name)))
             controls.insert(QLatin1String(name), QJsonObject{{"min", bar->minimum()}, {"max", bar->maximum()},

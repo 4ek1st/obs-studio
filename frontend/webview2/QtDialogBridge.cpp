@@ -1,6 +1,8 @@
 #include "QtDialogBridge.hpp"
 #include "WebView2Widget.hpp"
 
+#include <OBSApp.hpp>
+
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
@@ -655,7 +657,12 @@ QJsonObject QtDialogBridge::snapshot()
 		{"highlightedText", palette.color(QPalette::HighlightedText).name()}, {"fontFamily", font.value("family")},
 		{"fontSize", font.value("pixelSize")}, {"dark", palette.color(QPalette::Window).lightness() < 128}};
 	const auto title = impl->dialog->windowTitle().isEmpty() ? impl->dialog->window()->windowTitle() : impl->dialog->windowTitle();
-	return {{"title", title}, {"width", impl->dialog->width()}, {"height", impl->dialog->height()},
+	QJsonObject labels;
+	for (const auto *key : {"WebView2.Dialog", "WebView2.Dialog.Scroll", "WebView2.Dialog.Expand",
+				"WebView2.Dialog.Collapse", "WebView2.Dialog.OpenMenu", "WebView2.Dialog.UpdateFailed"})
+		labels.insert(QString::fromLatin1(key), QTStr(key));
+	return {{"title", title}, {"locale", QString::fromUtf8(App()->GetLocale())}, {"labels", labels},
+		{"width", impl->dialog->width()}, {"height", impl->dialog->height()},
 		{"focus", impl->widgetIds.value(impl->dialog->focusWidget())},
 		{"acceptDrops", impl->dialog->acceptDrops()},
 		{"enabled", impl->dialog->isEnabled()}, {"nodes", nodes}, {"theme", theme}, {"closed", !impl->dialog->isVisible()}};

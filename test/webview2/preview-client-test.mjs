@@ -4,14 +4,14 @@ import vm from "node:vm";
 import {readFile} from "node:fs/promises";
 
 const source=await readFile(new URL("../../frontend/webview2/ui/app.js",import.meta.url),"utf8");
-const production=source.slice(source.indexOf("function renderPreview("),source.indexOf("function render(next)"));
+const production=source.slice(source.indexOf("function renderPreview("),source.indexOf("function previewTrimCapacity()"));
 function setup(){
   const nodes=new Map();
   const make=()=>({dataset:{},style:{setProperty(name,value){this[name]=value;}},classList:{toggle(){}},children:[],firstElementChild:{style:{}},
     clientWidth:200,clientHeight:200,scrollWidth:400,scrollHeight:400,
     replaceChildren(...items){this.children=items;},matches(){return false;}});
   const $=id=>{if(!nodes.has(id))nodes.set(id,make());return nodes.get(id);};
-  const context=vm.createContext({$,panelMode:"",innerWidth:800,innerHeight:600,clean:value=>value.replace(/&/g,""),
+  const context=vm.createContext({$,panelMode:"",innerWidth:800,innerHeight:600,clean:value=>value.replace(/&/g,""),tr:(_key,fallback)=>fallback,
     document:{createElement:make},actionEntry:()=>({enabled:true})});
   vm.runInContext(production,context);
   return {$,render:value=>context.renderPreview(value)};
@@ -37,19 +37,29 @@ test("native disabled state exposes Enable Preview and removes scrollbar hit tar
 });
 test("native canvas ranges map proportionally to real scroll offsets",()=>{
   const {$,render}=setup();
-  render({previewControls:{enabled:true,previewXScrollBar:{min:-100,max:100,value:50,page:200},
+  render({previewControls:{enabled:true,fixed:true,previewXScrollBar:{min:-100,max:100,value:50,page:200},
     previewYScrollBar:{min:-100,max:100,value:-50,page:200}}});
+  assert.equal($("preview-scroll-x").hidden,false);
+  assert.equal($("preview-scroll-y").hidden,false);
   assert.equal($("preview-scroll-x").firstElementChild.style.width,"400px");
   assert.equal($("preview-scroll-x").scrollLeft,150);
   assert.equal($("preview-scroll-y").scrollTop,50);
 });
 test("scrollbar thickness uses the native widget size and current CSS viewport scale",()=>{
   const {$,render}=setup();
-  render({previewControls:{enabled:true,hostWidth:1000,hostHeight:750,
+  render({previewControls:{enabled:true,fixed:true,hostWidth:1000,hostHeight:750,
     previewXScrollBar:{extent:20,min:0,max:0,value:0,page:200},
     previewYScrollBar:{extent:25,min:0,max:0,value:0,page:200}}});
   assert.equal($("preview-grid").style["--preview-scroll-x"],"16px");
   assert.equal($("preview-grid").style["--preview-scroll-y"],"20px");
-  assert.equal($("preview-scroll-x").hidden,false);
-  assert.equal($("preview-scroll-y").hidden,false);
+  assert.equal($("preview-scroll-x").hidden,true);
+  assert.equal($("preview-scroll-y").hidden,true);
+});
+test("fit mode hides native panning bars even if an old range is reported",()=>{
+  const {$,render}=setup();
+  render({previewControls:{enabled:true,fixed:false,
+    previewXScrollBar:{min:0,max:100,value:25,page:200},
+    previewYScrollBar:{min:0,max:100,value:25,page:200}}});
+  assert.equal($("preview-scroll-x").hidden,true);
+  assert.equal($("preview-scroll-y").hidden,true);
 });

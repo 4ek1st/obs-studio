@@ -205,6 +205,108 @@ void installThemeWindowFrames()
     for (auto *window : QApplication::topLevelWidgets()) frames->apply(window);
 }
 
+// Qt paints a bright, beveled PE_FrameDockWidget around a floating tab group
+// when its docks use our custom title bars. The group is an internal QWidget,
+// so style and drag only that container and leave the normal dock controls alone.
+class FloatingDockGroupChrome final : public QObject {
+    QPointer<QMainWindow> main;
+    QPointer<QWidget> movingGroup;
+    QPointer<QWidget> movingGrip;
+    QPoint pressGlobal;
+    QPoint pressWindow;
+    QHash<QWidget *, QString> originalStyles;
+
+    QWidget *groupFor(QObject *object) const
+    {
+        auto *widget = qobject_cast<QWidget *>(object);
+        auto *group = widget ? widget->window() : nullptr;
+        return group && group->inherits("QDockWidgetGroupWindow") && group->parentWidget() == main ? group : nullptr;
+    }
+
+    void styleGroup(QWidget *group)
+    {
+        if (!group || originalStyles.contains(group)) return;
+        originalStyles.insert(group, group->styleSheet());
+        connect(group, &QObject::destroyed, this, [this, group] { originalStyles.remove(group); });
+        // A one-pixel border matching the window keeps Qt's edge resize area
+        // while replacing its platform-colored beveled group frame.
+        group->setStyleSheet(group->styleSheet() + QStringLiteral(
+            "\nQDockWidgetGroupWindow { background-color: palette(window); border: 1px solid palette(window); }"));
+    }
+
+    QTabBar *tabsFor(QWidget *group) const
+    {
+        for (auto *tabs : group->findChildren<QTabBar *>())
+            if (tabs->isVisible() && tabs->window() == group) return tabs;
+        return nullptr;
+    }
+
+    bool blankHeader(QWidget *group, QWidget *grip, const QMouseEvent *mouse) const
+    {
+        if (!group || group->findChildren<QDockWidget *>().size() < 2) return false;
+        auto *tabs = tabsFor(group);
+        if (!tabs) return false;
+        if (grip == tabs) return tabs->tabAt(mouse->position().toPoint()) < 0;
+        if (grip != group) return false;
+        const QPoint local = group->mapFromGlobal(mouse->globalPosition().toPoint());
+        const QPoint tabTop = tabs->mapTo(group, QPoint());
+        return local.y() >= tabTop.y() - 4 && local.y() <= tabTop.y() + tabs->height() + 4;
+    }
+
+public:
+    FloatingDockGroupChrome(QMainWindow *owner, QObject *parent) : QObject(parent), main(owner)
+    {
+        qApp->installEventFilter(this);
+        for (auto *widget : QApplication::allWidgets())
+            if (auto *group = groupFor(widget); group == widget) styleGroup(group);
+    }
+
+    ~FloatingDockGroupChrome() override
+    {
+        qApp->removeEventFilter(this);
+        for (auto it = originalStyles.cbegin(); it != originalStyles.cend(); ++it)
+            it.key()->setStyleSheet(it.value());
+    }
+
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        auto *group = groupFor(object);
+        if (!group || !main || !main->property("webview2NativeDocking").toBool())
+            return false;
+        if (object == group && event->type() == QEvent::Show) styleGroup(group);
+        if (event->type() != QEvent::MouseButtonPress && event->type() != QEvent::MouseMove &&
+            event->type() != QEvent::MouseButtonRelease) return false;
+        auto *grip = qobject_cast<QWidget *>(object);
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (movingGroup) {
+            if (event->type() == QEvent::MouseMove && mouse->buttons().testFlag(Qt::LeftButton)) {
+                movingGroup->move(pressWindow + mouse->globalPosition().toPoint() - pressGlobal);
+                mouse->accept();
+                return true;
+            }
+            if (event->type() == QEvent::MouseButtonRelease && mouse->button() == Qt::LeftButton) {
+                if (movingGrip) movingGrip->unsetCursor();
+                movingGroup = nullptr;
+                movingGrip = nullptr;
+                mouse->accept();
+                return true;
+            }
+            return false;
+        }
+        if (event->type() != QEvent::MouseButtonPress || mouse->button() != Qt::LeftButton ||
+            !blankHeader(group, grip, mouse)) return false;
+        auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
+        if (lock && lock->isChecked()) return false;
+        movingGroup = group;
+        movingGrip = grip;
+        pressGlobal = mouse->globalPosition().toPoint();
+        pressWindow = group->pos();
+        grip->setCursor(Qt::ClosedHandCursor);
+        mouse->accept();
+        return true;
+    }
+};
+
 struct NativePlacement {
 	QPointer<QWidget> parent;
 	QPointer<QLayout> layout;
@@ -269,6 +371,7 @@ class OBSWebView2 final : public QWidget {
 	std::array<QTabWidget::TabPosition, 4> nativeDockTabPositions{};
 	QMainWindow::DockOptions nativeDockOptions{};
 	bool dockTabPositionsSaved = false;
+	FloatingDockGroupChrome *floatingDockGroupChrome = nullptr;
 	WebView2Widget *browser;
 	OBSQTDisplay *preview;
 	QPointer<OBSQTDisplay> programPreview;
@@ -393,10 +496,36 @@ class OBSWebView2 final : public QWidget {
 		QJsonObject labels;
 		for (const auto *key : {"Basic.Main.Scenes", "Basic.Main.Sources", "Mixer",
 					"Basic.Main.Controls", "Basic.SceneTransitions", "Basic.MainMenu.File",
-					"Basic.MainMenu.Edit", "Basic.MainMenu.View", "Basic.MainMenu.Profile"}) {
+					"Basic.MainMenu.Edit", "Basic.MainMenu.View", "Basic.MainMenu.Profile",
+					"OK", "Cancel", "Rename", "Properties", "Filters", "Interact",
+					"Transition", "StudioMode.Preview", "StudioMode.Program",
+					"Basic.Main.PreviewConextMenu.Enable", "ContextBar.NoSelectedSource",
+					"Basic.MainMenu.View.ContextBar", "Basic.MainMenu.Edit.Scale.ZoomIn",
+					"Basic.MainMenu.Edit.Scale.ZoomOut", "Basic.Main.GroupItems",
+					"Basic.TransitionDuration", "Basic.AdvAudio", "Basic.AdvAudio.VolumeSource",
+					"Basic.AudioMixer.Options", "Basic.AudioMixer.HiddenTotal",
+					"Basic.AudioMixer.ShowHidden", "Basic.AudioMixer.Layout.Horizontal",
+					"Basic.AudioMixer.Layout.Vertical", "Basic.AudioMixer.Category.Global",
+					"Basic.AudioMixer.Category.Pinned", "Basic.AudioMixer.Category.Active",
+					"Basic.AudioMixer.Category.Inactive", "Mute", "Unmute", "MonitorOn",
+					"MonitorOff", "AddScene", "AddSource",
+					"WebView2.Menus", "WebView2.MainWindow", "WebView2.MainWindow.Tooltip",
+					"WebView2.CloseNotification", "WebView2.PreviewAndProgram",
+					"WebView2.PreviewTrimLeft", "WebView2.PreviewTrimRight",
+					"WebView2.PreviewScrollVertical", "WebView2.PreviewScrollHorizontal",
+					"WebView2.ManualTransition", "WebView2.TransitionSettings",
+					"WebView2.PreviewScaling", "WebView2.PanelHeight",
+					"WebView2.SceneTools", "WebView2.SourceTools", "WebView2.Audio",
+					"WebView2.Milliseconds", "WebView2.Connecting", "WebView2.NoConnection",
+					"WebView2.ExpandGroup", "WebView2.CollapseGroup",
+					"WebView2.ShowSource", "WebView2.HideSource", "WebView2.LockSource",
+					"WebView2.UnlockSource", "WebView2.EmptySources", "WebView2.EmptyScenes",
+					"WebView2.EmptyAudio", "WebView2.ChannelActions", "WebView2.SelectedSources",
+					"WebView2.ConfigureQuickTransition", "WebView2.AddQuickTransition"}) {
 			labels.insert(QString::fromLatin1(key), QTStr(key));
 		}
-		QJsonObject state{{"title", main->windowTitle()}, {"scenes", sceneList}, {"sources", sourceList},
+		QJsonObject state{{"title", main->windowTitle()}, {"locale", QString::fromUtf8(App()->GetLocale())},
+				   {"scenes", sceneList}, {"sources", sourceList},
 				   {"currentScene", SourceId(scene)}, {"controls", controls},
 				   {"menus", menuState(main->menuBar()->actions())}, {"labels", labels},
 				   {"studioMode", studio}, {"recording", obs_frontend_recording_active()},
@@ -794,12 +923,15 @@ public:
 		workspaceMounted = true;
 		setProperty("webview2NativeDocking", true);
 		main->setProperty("webview2NativeDocking", true);
+		floatingDockGroupChrome = new FloatingDockGroupChrome(main, this);
 		setProperty("webview2OwnsSession", false);
 		show();
 	}
 	void unmountWorkspace()
 	{
 		if (!workspaceMounted) return;
+		delete floatingDockGroupChrome;
+		floatingDockGroupChrome = nullptr;
 		if (dockTabPositionsSaved) {
 			main->setDockOptions(nativeDockOptions);
 			int index = 0;

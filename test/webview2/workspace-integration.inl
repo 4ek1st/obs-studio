@@ -196,6 +196,82 @@ void runDockTabDetachChecks(std::function<void(bool, const char *)> check, std::
     });
 }
 
+void runFloatingGroupChromeChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
+{
+    auto *scenes = main->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
+    auto *controls = main->findChild<QDockWidget *>(QStringLiteral("controlsDock"));
+    auto *lock = main->findChild<QAction *>(QStringLiteral("lockDocks"));
+    if (!scenes || !controls || !lock) { check(false, "Floating group fixture exists"); done(); return; }
+    const auto original = main->saveState();
+    const bool wasLocked = lock->isChecked();
+    lock->setChecked(false);
+    main->showNormal();
+    main->resize(1280, 840);
+    main->addDockWidget(Qt::LeftDockWidgetArea, scenes);
+    main->addDockWidget(Qt::RightDockWidgetArea, controls);
+    scenes->show();
+    controls->show();
+    main->tabifyDockWidget(scenes, controls);
+    controls->raise();
+    QTimer::singleShot(180, this, [this, scenes = QPointer<QDockWidget>(scenes),
+        controls = QPointer<QDockWidget>(controls), lock = QPointer<QAction>(lock),
+        original, wasLocked, check, done] {
+        auto mouse = [](QWidget *widget, QEvent::Type type, QPoint global,
+                        Qt::MouseButton button, Qt::MouseButtons buttons) {
+            const QPointF local = widget->mapFromGlobal(global);
+            QMouseEvent event(type, local, local, QPointF(global), button, buttons, Qt::NoModifier);
+            QApplication::sendEvent(widget, &event);
+        };
+        auto *title = controls ? controls->titleBarWidget() : nullptr;
+        check(title && title->isVisible(), "Tabbed panel exposes its native group drag title");
+        if (title) {
+            const QPoint grip = title->mapToGlobal(QPoint(30, title->height() / 2));
+            const QPoint outside = main->mapToGlobal(QPoint(main->width() + 180, main->height() / 2));
+            mouse(title, QEvent::MouseButtonPress, grip, Qt::LeftButton, Qt::LeftButton);
+            mouse(title, QEvent::MouseMove, grip + QPoint(40, 0), Qt::NoButton, Qt::LeftButton);
+            mouse(title, QEvent::MouseMove, outside, Qt::NoButton, Qt::LeftButton);
+            mouse(title, QEvent::MouseButtonRelease, outside, Qt::LeftButton, Qt::NoButton);
+        }
+        QTimer::singleShot(220, this, [this, scenes, controls, lock, original, wasLocked, check, done, mouse] {
+            QPointer<QWidget> group;
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (widget->inherits("QDockWidgetGroupWindow") && widget->parentWidget() == main &&
+                    widget->findChildren<QDockWidget *>().contains(controls)) { group = widget; break; }
+            check(group && group->isVisible() && group->findChildren<QDockWidget *>().contains(scenes),
+                  "Dragging a tabbed panel title creates a floating group with both panels");
+            if (group) {
+                check(group->styleSheet().contains(QStringLiteral("border: 1px solid palette(window)")) &&
+                      group->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, group) == 1,
+                      "Floating group uses a flat theme frame instead of the bright Qt bevel");
+                const auto artifacts = qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS");
+                if (!artifacts.isEmpty())
+                    group->grab().save(QDir(artifacts).filePath(QStringLiteral("frame-floating-group.png")));
+                QTabBar *tabs = nullptr;
+                for (auto *bar : group->findChildren<QTabBar *>())
+                    if (bar->isVisible()) { tabs = bar; break; }
+                if (tabs && tabs->tabAt(QPoint(tabs->width() - 10, tabs->height() / 2)) >= 0) {
+                    group->resize(group->width() + 180, group->height());
+                    QCoreApplication::processEvents();
+                }
+                const QPoint blank = tabs ? tabs->mapToGlobal(QPoint(tabs->width() - 10, tabs->height() / 2)) : QPoint();
+                check(tabs && tabs->tabAt(tabs->mapFromGlobal(blank)) < 0,
+                      "Floating group has a blank strip beside its tabs");
+                if (tabs && tabs->tabAt(tabs->mapFromGlobal(blank)) < 0) {
+                    const QPoint before = group->pos();
+                    mouse(tabs, QEvent::MouseButtonPress, blank, Qt::LeftButton, Qt::LeftButton);
+                    mouse(tabs, QEvent::MouseMove, blank + QPoint(85, 48), Qt::NoButton, Qt::LeftButton);
+                    mouse(tabs, QEvent::MouseButtonRelease, blank + QPoint(85, 48), Qt::LeftButton, Qt::NoButton);
+                    check(group && group->pos() == before + QPoint(85, 48),
+                          "Dragging the blank top strip moves the entire floating group");
+                }
+            }
+            main->restoreState(original);
+            if (lock) lock->setChecked(wasLocked);
+            done();
+        });
+    });
+}
+
 void runWindowFrameChecks(std::function<void(bool, const char *)> check, std::function<void()> done)
 {
     auto captureHandle = [](HWND hwnd, const QString &name) -> QImage {

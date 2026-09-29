@@ -166,7 +166,7 @@ public:
         close->setObjectName(QStringLiteral("obsWebView2DockClose"));
         close->setAutoRaise(true);
         close->setIcon(style()->standardIcon(QStyle::SP_DockWidgetCloseButton));
-        close->setToolTip(QDockWidget::tr("Close"));
+        close->setToolTip(QTStr("Close"));
         close->setAccessibleName(close->toolTip());
         layout->addWidget(close);
         connect(toggle, &QToolButton::clicked, this, [this] {
@@ -200,9 +200,7 @@ QHash<QDockWidget *, WebDockChrome> webDockChrome;
 void installWebDockChrome(QDockWidget *dock)
 {
     if (webDockChrome.contains(dock)) return;
-    const bool russian = QByteArray(App()->GetLocale()).startsWith("ru");
-    auto *title = new WebDockTitleBar(dock, russian ? QStringLiteral("Закрепить") : QDockWidget::tr("Dock"),
-        russian ? QStringLiteral("Отделить панель") : QDockWidget::tr("Float"));
+    auto *title = new WebDockTitleBar(dock, QTStr("WebView2.Dock"), QTStr("WebView2.Float"));
     const QPointer<QWidget> original = dock->titleBarWidget();
     webDockChrome.insert(dock, {original, title});
     if (original) original->hide();

@@ -1,16 +1,27 @@
 import { createBridge, createPresentation } from "./bridge.mjs";
 import { installExternalDrop } from "./external-drop.mjs";
+import { clampPreviewTrims, previewTrimLimit } from "./preview-trim.mjs";
+import { applyLocalization, translate } from "./localization.mjs";
 
 const $ = id => document.getElementById(id);
 const clean = text => String(text ?? "").replace(/&&/g, "\u0000").replace(/&/g, "").replace(/\u0000/g, "&");
 const keyOf = row => [row.owner ?? "", row.id, row.uuid].join("/");
 let bridge, state, renameTarget, dragged;
+let localizationSignature = "";
+const tr = (key, fallback, ...args) => translate(state?.labels, key, fallback, ...args);
 let present;
 let menuSignature = "", boundsFrame = 0, connected = false;
 let boundsPending = false, boundsDirty = false, boundsSignature = "";
 const audioElements = new Map(), actionsByName = new Map();
 const defaultPanelOrder = ["scenesDock","sourcesDock","mixerDock","transitionsDock","controlsDock"];
 let panelMode = "";
+const previewTrimKey = "obs.webview2.preview-trim.v1";
+let previewTrim = {left: 0, right: 0};
+let appliedPreviewTrim = {left: 0, right: 0};
+try {
+  const saved = JSON.parse(localStorage.getItem(previewTrimKey));
+  previewTrim = clampPreviewTrims(saved?.left, saved?.right, Number.MAX_SAFE_INTEGER);
+} catch { /* A private WebView profile can disable storage. */ }
 const nativeCommands = new Set(["action.invoke", "control.click", "native.command", "source.visibility", "source.lock", "source.expand", "source.rename", "source.move", "source.selectAll", "scene.rename", "scene.move", "scene.activate"]);
 const iconPaths = {
   plus:"M8 2v12M2 8h12", trash:"M3 4h10M6 2h4M4 4l1 10h6l1-10M7 6v6M9 6v6",
@@ -119,7 +130,7 @@ function renderToolbar(id,items) {
     const element=iconButton(toolbarSymbol(action.name||""),action.text,()=>request("action.invoke",{id:action.id}),action.enabled);
     element.dataset.action=action.name||action.id;nodes.push(element);
   }
-  if(id==="source-toolbar")nodes.push(iconButton("folder","Группировать выделенные источники",()=>request("native.command",{id:"source.group"}),state.sources.some(x=>x.selected)));
+  if(id==="source-toolbar")nodes.push(iconButton("folder",tr("Basic.Main.GroupItems","Group Selected Items"),()=>request("native.command",{id:"source.group"}),state.sources.some(x=>x.selected)));
   target.replaceChildren(...nodes);
 }
 function listDropPosition(rect,event,group=false,grid=false) {
@@ -153,7 +164,7 @@ async function rename(kind,row) {
   const list=$(kind==="source"?"sources":"scenes"),identity=kind==="source"?keyOf(row):row.uuid;
   const entry=Array.from(list.children).find(node=>node.dataset.id===identity),name=entry?.querySelector(".name");
   if(!name||entry.querySelector("input"))return;
-  const editor=document.createElement("input");editor.className="row-name-editor";editor.value=row.name;editor.dataset.scene=state.currentScene;editor.dataset.identity=identity;editor.setAttribute("aria-label","Переименовать");
+  const editor=document.createElement("input");editor.className="row-name-editor";editor.value=row.name;editor.dataset.scene=state.currentScene;editor.dataset.identity=identity;editor.setAttribute("aria-label",tr("Rename","Rename"));
   name.replaceChildren(editor);entry.draggable=false;let finished=false;
   const finish=async(save,notify=true)=>{if(finished)return;finished=true;entry.draggable=true;name.textContent=row.name;
     if(kind==="source"&&notify)await request("source.rename",{...sourceArgs(row),name:editor.value,save});
@@ -187,15 +198,15 @@ function renderRows(element,rows,sources=false) {
     entry.tabIndex=row===tabRow?0:-1;
     entry.dataset.id=identity;entry.setAttribute("role","option");entry.setAttribute("aria-selected",String(sources?row.selected:row.uuid===state.currentScene));
     entry.draggable=true;entry.style.paddingLeft=(5+(row.depth||0)*16)+"px";
-    if(sources&&row.group){const expand=button(row.collapsed?"▸":"▾",e=>{e.stopPropagation();request("source.expand",{...sourceArgs(row),value:!!row.collapsed});});expand.className="expand";expand.setAttribute("aria-label",row.collapsed?"Развернуть группу":"Свернуть группу");entry.append(expand);}
+    if(sources&&row.group){const expand=button(row.collapsed?"▸":"▾",e=>{e.stopPropagation();request("source.expand",{...sourceArgs(row),value:!!row.collapsed});});expand.className="expand";expand.setAttribute("aria-label",row.collapsed?tr("WebView2.ExpandGroup","Expand group"):tr("WebView2.CollapseGroup","Collapse group"));entry.append(expand);}
     const type=document.createElement("span");type.className="type-icon";
     if(sources&&row.icon?.startsWith("data:image/png;base64,")){const image=document.createElement("img");image.src=row.icon;image.width=image.height=16;image.alt="";type.append(image);}else type.append(icon(row.group?"folder":sources?"image":"monitor"));
     const name=document.createElement("span");name.className="name";name.textContent=row.name;if(sources)entry.append(type);entry.append(name);
     if(sources&&/^#[0-9a-f]{8}$/i.test(row.color||""))entry.style.setProperty("--source-color",row.color);
     if(sources) {
-      const visible=iconButton("eye",row.visible?"Скрыть источник":"Показать источник",e=>{e.stopPropagation();request("source.visibility",{...sourceArgs(row),value:!row.visible});});
+      const visible=iconButton("eye",row.visible?tr("WebView2.HideSource","Hide source"):tr("WebView2.ShowSource","Show source"),e=>{e.stopPropagation();request("source.visibility",{...sourceArgs(row),value:!row.visible});});
       visible.className="flag"+(row.visible?"":" off");visible.setAttribute("aria-pressed",String(row.visible));
-      const locked=iconButton("lock",row.locked?"Разблокировать источник":"Заблокировать источник",e=>{e.stopPropagation();request("source.lock",{...sourceArgs(row),value:!row.locked});});
+      const locked=iconButton("lock",row.locked?tr("WebView2.UnlockSource","Unlock source"):tr("WebView2.LockSource","Lock source"),e=>{e.stopPropagation();request("source.lock",{...sourceArgs(row),value:!row.locked});});
       locked.className="flag"+(row.locked?"":" off");locked.setAttribute("aria-pressed",String(row.locked));entry.append(visible,locked);
     }
     const select=event=>sources?selectSource(row,event):request("scene.select",{uuid:row.uuid});
@@ -234,8 +245,8 @@ function renderRows(element,rows,sources=false) {
     nodes.push(entry);
   }
   if(!rows.length){
-    const empty=document.createElement("div");empty.className="empty";empty.append(document.createTextNode(sources?"Добавьте источник: захват экрана, игру, камеру, изображение или текст.":"Создайте первую сцену."));
-    empty.append(document.createElement("br"),button(sources?"+ Добавить источник":"+ Добавить сцену",()=>invokeName(sources?"actionAddSource":"actionAddScene")));nodes.push(empty);
+    const empty=document.createElement("div");empty.className="empty";empty.append(document.createTextNode(sources?tr("WebView2.EmptySources","Add a source to this scene."):tr("WebView2.EmptyScenes","Create your first scene.")));
+    empty.append(document.createElement("br"),button("+ "+tr(sources?"AddSource":"AddScene",sources?"Add Source":"Add Scene"),()=>invokeName(sources?"actionAddSource":"actionAddScene")));nodes.push(empty);
   }
   element.replaceChildren(...nodes);element.scrollTop=scroll;
   if(focused)Array.from(element.children).find(x=>x.dataset.id===focused)?.focus({preventScroll:true});
@@ -314,15 +325,15 @@ function renderMixer(channels) {
       installNativeFaderInput(volume,channel.uuid,async(command,args)=>{
         ++inputFlight;try{await request(command,args);}finally{--inputFlight;endVolumeEdit();}
       });
-      const mute=iconButton("volume","Заглушить",()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.mute",{uuid:channel.uuid,value:!current.muted});});mute.className="audio-mute";
-      const monitor=iconButton("headphones","Включить мониторинг",()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.monitor",{uuid:channel.uuid,value:current.monitoring?0:2});});monitor.className="audio-monitor";
+      const mute=iconButton("volume",tr("Mute","Mute"),()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.mute",{uuid:channel.uuid,value:!current.muted});});mute.className="audio-mute";
+      const monitor=iconButton("headphones",tr("MonitorOn","Enable Monitoring"),()=>{const current=state.audio.find(c=>c.uuid===channel.uuid);if(current)request("audio.monitor",{uuid:channel.uuid,value:current.monitoring?0:2});});monitor.className="audio-monitor";
       buttons.append(mute,monitor);controls.append(body,buttons);container.append(title,controls);
       container.addEventListener("contextmenu",event=>{event.preventDefault();context();});
       entry={container,name,nameText,category,db,volume,volumeBusy,mute,monitor,meters,bars:[],fader,ticks};audioElements.set(channel.uuid,entry);
     }
-    entry.nameText.textContent=channel.name;entry.name.title=channel.name;entry.name.setAttribute("aria-label","Действия канала: "+channel.name);
-    entry.category.textContent=channel.category|| (channel.global?"Глобальный":channel.pinned?"Закреплён":channel.active===false?"Неактивен":"Активен");
-    entry.db.textContent=channel.dbText|| (Number.isFinite(channel.db)&&channel.db>-96?channel.db.toFixed(1)+" dB":"-inf dB");entry.volume.setAttribute("aria-label",channel.name+" — громкость");
+    entry.nameText.textContent=channel.name;entry.name.title=channel.name;entry.name.setAttribute("aria-label",tr("WebView2.ChannelActions","Channel actions: %1",channel.name));
+    entry.category.textContent=channel.category|| (channel.global?tr("Basic.AudioMixer.Category.Global","Global"):channel.pinned?tr("Basic.AudioMixer.Category.Pinned","Pinned"):channel.active===false?tr("Basic.AudioMixer.Category.Inactive","Inactive"):tr("Basic.AudioMixer.Category.Active","Active"));
+    entry.db.textContent=channel.dbText|| (Number.isFinite(channel.db)&&channel.db>-96?channel.db.toFixed(1)+" dB":"-inf dB");entry.volume.setAttribute("aria-label",tr("Basic.AdvAudio.VolumeSource","Volume for '%1'",channel.name));
     entry.volume.setAttribute("aria-orientation",vertical?"vertical":"horizontal");entry.volume.setAttribute("aria-valuetext",entry.db.textContent);
     if(!entry.volumeBusy())entry.volume.value=channel.volume;
     entry.fader.style.setProperty("--volume",Number(entry.volume.value)*100+"%");
@@ -330,7 +341,7 @@ function renderMixer(channels) {
     entry.mute.disabled=!channel.enabled||channel.muteEnabled===false;entry.monitor.disabled=!channel.enabled||channel.monitorEnabled===false||channel.monitoringAvailable===false;
     entry.mute.classList.toggle("muted",channel.muted);entry.monitor.classList.toggle("monitored",!!channel.monitoring);
     for(const [control,prefix,fallback,pressed] of [[entry.mute,"mute",channel.muted?"muted":"volume",channel.muted],[entry.monitor,"monitor","headphones",!!channel.monitoring]]){
-      control.title=channel[prefix+"Tooltip"]||(prefix==="mute"?(pressed?"Включить звук":"Заглушить"):(pressed?"Отключить мониторинг":"Включить мониторинг"));
+      control.title=channel[prefix+"Tooltip"]||(prefix==="mute"?(pressed?tr("Unmute","Unmute"):tr("Mute","Mute")):(pressed?tr("MonitorOff","Disable Monitoring"):tr("MonitorOn","Enable Monitoring")));
       control.setAttribute("aria-label",control.title+": "+channel.name);control.setAttribute("aria-pressed",String(pressed));
       const image=channel[prefix+"Icon"],signature=image||fallback;
       if(control.dataset.icon!==signature){control.dataset.icon=signature;if(image?.startsWith("data:image/png;base64,")){const img=document.createElement("img");img.src=image;img.alt="";control.replaceChildren(img);}else control.replaceChildren(icon(fallback));}
@@ -371,11 +382,11 @@ function renderMixer(channels) {
   }
   for(const [uuid,entry]of audioElements)if(!present.has(uuid)){entry.container.remove();audioElements.delete(uuid);}
   $("mixer").querySelector(".empty")?.remove();
-  if(!present.size){const empty=document.createElement("div");empty.className="empty";empty.textContent="Аудиоисточники появятся здесь после добавления."; $("mixer").append(empty);}
+  if(!present.size){const empty=document.createElement("div");empty.className="empty";empty.textContent=tr("WebView2.EmptyAudio","Audio sources will appear here when added."); $("mixer").append(empty);}
   const footer=state.mixerToolbar||{},hidden=footer.hidden;
-  mixerHidden.textContent=hidden?.text||"Скрыто: "+(channels||[]).filter(channel=>channel.hidden).length;mixerHidden.disabled=hidden?.enabled!==true;mixerHidden.title=hidden?.tooltip||"Показать скрытые каналы";mixerHidden.setAttribute("aria-pressed",String(!!hidden?.checked));
-  mixerLayout.title=vertical?"Горизонтальная компоновка":"Вертикальная компоновка";mixerLayout.setAttribute("aria-label",mixerLayout.title);mixerLayout.replaceChildren(icon(vertical?"layoutHorizontal":"layoutVertical"));
-  $("mixer-menu").textContent=(footer.optionsText||"Параметры")+" ▾";
+  mixerHidden.textContent=hidden?.text||tr("Basic.AudioMixer.HiddenTotal","%1 hidden",(channels||[]).filter(channel=>channel.hidden).length);mixerHidden.disabled=hidden?.enabled!==true;mixerHidden.title=hidden?.tooltip||tr("Basic.AudioMixer.ShowHidden","Show hidden sources");mixerHidden.setAttribute("aria-pressed",String(!!hidden?.checked));
+  mixerLayout.title=vertical?tr("Basic.AudioMixer.Layout.Horizontal","Horizontal Layout"):tr("Basic.AudioMixer.Layout.Vertical","Vertical Layout");mixerLayout.setAttribute("aria-label",mixerLayout.title);mixerLayout.replaceChildren(icon(vertical?"layoutHorizontal":"layoutVertical"));
+  $("mixer-menu").textContent=(footer.optionsText||tr("Basic.AudioMixer.Options","Options"))+" ▾";
 }
 function updateLevels(levels) {
   if(!rendersPanel("mixerDock"))return;
@@ -420,7 +431,7 @@ function renderTransitions(next) {
   $("program-column").hidden=$("studio-controls").hidden=!next.studioMode;
   $("studio-transition").disabled=next.studioTransitionEnabled===false;
   $("tbar").disabled=next.tbarEnabled===false;
-  $("preview-mode").textContent=next.studioMode?"Предпросмотр":"";
+  $("preview-mode").textContent=next.studioMode?tr("StudioMode.Preview","Preview"):"";
   $("program-title").textContent=next.programName||"";
   const quick=next.quickTransitions||[],quickSignature=JSON.stringify([quick,next.addQuickTransition,next.addQuickTransitionEnabled]);
   if($("quick-transitions").dataset.signature!==quickSignature){
@@ -428,10 +439,10 @@ function renderTransitions(next) {
     const nodes=quick.map(c=>{
       const row=document.createElement("div");row.className="quick-row";
       const action=button(c.text,()=>request("control.click",{id:c.id}),c.enabled);action.title=clean(c.text);
-      row.append(action,iconButton("dots","Настроить "+clean(c.text),()=>request("native.command",{id:"studio.quick.options",button:c.id}),c.enabled));
+      row.append(action,iconButton("dots",tr("WebView2.ConfigureQuickTransition","Configure %1",clean(c.text)),()=>request("native.command",{id:"studio.quick.options",button:c.id}),c.enabled));
       return row;
     });
-    if(next.addQuickTransition)nodes.push(button("+ Быстрый переход",()=>request("control.click",{id:next.addQuickTransition}),next.addQuickTransitionEnabled!==false));
+    if(next.addQuickTransition)nodes.push(button("+ "+tr("WebView2.AddQuickTransition","Add Quick Transition"),()=>request("control.click",{id:next.addQuickTransition}),next.addQuickTransitionEnabled!==false));
     $("quick-transitions").replaceChildren(...nodes);
   }
   const tbar=$("tbar"),geometry=next.tbarGeometry;
@@ -527,13 +538,15 @@ function renderPreview(next) {
   select.value=String(controls.index??0);
   $("preview-percent").textContent=controls.percent||"";
   $("preview-disabled").hidden=controls.enabled!==false;
-  $("enable-preview").textContent=clean(controls.enableText||"Включить предпросмотр");
+  $("enable-preview").textContent=clean(controls.enableText||tr("Basic.Main.PreviewConextMenu.Enable","Enable Preview"));
   $("preview-grid").classList.toggle("preview-disabled",controls.enabled===false);
   $("zoom-in").disabled=actionEntry("actionPreviewZoomIn")?.enabled===false;
   $("zoom-out").disabled=actionEntry("actionPreviewZoomOut")?.enabled===false;
   for(const axis of ["x","y"]){
     const element=$("preview-scroll-"+axis),bar=controls[axis==="x"?"previewXScrollBar":"previewYScrollBar"];
-    element.hidden=controls.enabled===false;
+    // Fit-to-window never needs panning. Fixed-scale previews only need a
+    // scrollbar when OBS actually reports a scrollable range.
+    element.hidden=controls.enabled===false||!controls.fixed||!bar||bar.max<=bar.min;
     if(!bar)continue;
     const hostExtent=axis==="x"?controls.hostHeight:controls.hostWidth;
     const cssExtent=axis==="x"?innerHeight:innerWidth;
@@ -552,10 +565,86 @@ function renderPreview(next) {
     if(!element.matches(":active"))element[axis==="x"?"scrollLeft":"scrollTop"]=value;
   }
 }
+function previewTrimCapacity() {
+  const controls=state?.previewControls,canvas=$("preview");
+  if(!controls?.canvasWidth||!controls?.canvasHeight||!canvas.clientWidth||!canvas.clientHeight)return 0;
+  const cssPerQt=innerWidth/Math.max(1,controls.hostWidth||innerWidth);
+  const pixelRatio=Math.max(0.1,controls.pixelRatio||1);
+  const edge=10*cssPerQt/pixelRatio;
+  const fullCanvasWidth=canvas.clientWidth+appliedPreviewTrim.left+appliedPreviewTrim.right;
+  const renderedWidth=controls.canvasWidth*Math.max(0,controls.scale||0)*cssPerQt/pixelRatio;
+  return previewTrimLimit(fullCanvasWidth,canvas.clientHeight,
+    controls.canvasWidth/controls.canvasHeight,renderedWidth,edge);
+}
+function syncPreviewTrim(activeSide="") {
+  if(!state||panelMode)return;
+  const enabled=state.previewControls?.enabled!==false&&!state.studioMode;
+  const limit=enabled?previewTrimCapacity():0;
+  // Resizing can temporarily reduce the available space. Keep the user's
+  // saved widths intact and apply only the portion that currently fits.
+  const next=enabled?clampPreviewTrims(previewTrim.left,previewTrim.right,limit,activeSide):{left:0,right:0};
+  const area=document.querySelector(".preview-area");
+  if(appliedPreviewTrim.left!==next.left||appliedPreviewTrim.right!==next.right){
+    area.style.setProperty("--preview-trim-left",next.left+"px");
+    area.style.setProperty("--preview-trim-right",next.right+"px");
+    appliedPreviewTrim={...next};scheduleBounds();
+  }
+  for(const side of ["left","right"]){
+    const handle=$("preview-trim-"+side);
+    handle.hidden=!enabled;
+    handle.setAttribute("aria-valuemin","0");
+    handle.setAttribute("aria-valuemax",String(Math.max(0,limit-next[side=== "left"?"right":"left"])));
+    handle.setAttribute("aria-valuenow",String(next[side]));
+  }
+}
+function savePreviewTrim() {
+  try { localStorage.setItem(previewTrimKey,JSON.stringify(previewTrim)); } catch { /* layout still works */ }
+}
+for(const side of ["left","right"]){
+  const handle=$("preview-trim-"+side);
+  let drag=null;
+  handle.addEventListener("pointerdown",event=>{
+    if(event.button!==0||handle.hidden)return;
+    event.preventDefault();syncPreviewTrim();
+    drag={id:event.pointerId,x:event.clientX,left:appliedPreviewTrim.left,right:appliedPreviewTrim.right,
+      limit:previewTrimCapacity()};
+    handle.setPointerCapture(event.pointerId);
+    handle.classList.add("dragging");
+  });
+  handle.addEventListener("pointermove",event=>{
+    if(!drag||event.pointerId!==drag.id)return;
+    const change=(event.clientX-drag.x)*(side==="left"?1:-1);
+    previewTrim=clampPreviewTrims(side==="left"?drag.left+change:drag.left,
+      side==="right"?drag.right+change:drag.right,drag.limit,side);
+    syncPreviewTrim(side);
+  });
+  const finish=event=>{
+    if(!drag||event.pointerId!==drag.id)return;
+    drag=null;handle.classList.remove("dragging");savePreviewTrim();
+  };
+  handle.addEventListener("pointerup",finish);
+  handle.addEventListener("pointercancel",finish);
+  handle.addEventListener("keydown",event=>{
+    if(!["ArrowLeft","ArrowRight","Home"].includes(event.key)||handle.hidden)return;
+    event.preventDefault();
+    const direction=event.key==="ArrowRight"?1:event.key==="ArrowLeft"?-1:0;
+    const change=direction*(side==="left"?1:-1)*(event.shiftKey?32:8);
+    previewTrim=clampPreviewTrims(
+      side==="left"?(event.key==="Home"?0:appliedPreviewTrim.left+change):appliedPreviewTrim.left,
+      side==="right"?(event.key==="Home"?0:appliedPreviewTrim.right+change):appliedPreviewTrim.right,
+      previewTrimCapacity(),side);
+    syncPreviewTrim(side);savePreviewTrim();
+  });
+}
 function render(next) {
-  state=next;connected=true;document.title=next.title+" — WebView2";$("connection").textContent="OBS Studio";
+  state=next;connected=true;document.title=next.title+" — WebView2";
+  const signature=JSON.stringify([next.locale,next.labels]);
+  if(signature!==localizationSignature){
+    localizationSignature=signature;applyLocalization(document,next.labels,next.locale);
+    for(const id of ["scene-toolbar","source-toolbar","scenes","sources","quick-transitions"])$(id).dataset.signature="";
+  }
+  $("connection").textContent="OBS Studio";
   $("scene-title").textContent=next.scenes.find(scene=>scene.uuid===next.currentScene)?.name??"";
-  for(const [id,label]of [["scenes-title","Basic.Main.Scenes"],["sources-title","Basic.Main.Sources"],["mixer-title","Mixer"],["controls-title","Basic.Main.Controls"],["transitions-title","Basic.SceneTransitions"]])if(next.labels?.[label])$(id).textContent=next.labels[label];
   if(next.appearance){const a=next.appearance;for(const [variable,key]of [["bg","background"],["panel","panel"],["raised","raised"],["text","text"],["muted","muted"],["selected","selected"],["selection-text","selectedText"]])if(/^#[0-9a-f]{6}$/i.test(a[key]||""))document.documentElement.style.setProperty("--"+variable,a[key]);document.documentElement.style.colorScheme=a.light?"light":"dark";document.body.classList.toggle("light-theme",!!a.light);if(a.raised===a.background)document.documentElement.style.setProperty("--raised","color-mix(in srgb,var(--bg) 86%,var(--text) 14%)");}
   $("status").textContent=[Number.isFinite(next.cpu)?next.cpu.toFixed(1)+"% CPU":"",Number(next.fps||0).toFixed(2)+" FPS"].filter(Boolean).join("  ·  ");
   if(next.appearance?.fontFamily)document.documentElement.style.fontFamily=JSON.stringify(next.appearance.fontFamily)+', "Open Sans", sans-serif';
@@ -568,13 +657,14 @@ function render(next) {
   if(rendersPanel("scenesDock")){renderToolbar("scene-toolbar",next.sceneToolbar);renderRows($("scenes"),next.scenes);}
   if(rendersPanel("sourcesDock")){renderToolbar("source-toolbar",next.sourceToolbar);renderRows($("sources"),next.sources,true);}
   const selection=next.sources.filter(s=>s.selected),selected=selection.length===1?selection[0]:null;
-  $("selected-name").textContent=selected?.name||(selection.length?selection.length+" источников выбрано":"Источник не выбран");
+  $("selected-name").textContent=selected?.name||(selection.length?tr("WebView2.SelectedSources","%1 sources selected",selection.length):tr("ContextBar.NoSelectedSource","No source selected"));
   $("properties").disabled=$("filters").disabled=!selected;$("interact").hidden=!selected?.interactive;
   $("source-tools").hidden=!next.sourceTools;
   if(rendersPanel("mixerDock"))renderMixer(next.audio||[]);
   if(!panelMode||panelMode==="transitionsDock")renderTransitions(next);
   if(rendersPanel("controlsDock"))renderControls(next.controls);
   renderWorkspace(next);
+  syncPreviewTrim();
   scheduleBounds();
   present?.().catch(showError);
 }
@@ -637,8 +727,8 @@ for(const kind of ["properties","filters","interact"])$(kind).addEventListener("
 $("advanced-audio").addEventListener("click",()=>invokeName("actionAdvAudioProperties"));
 const mixerToolbar=$("advanced-audio").parentElement;
 mixerToolbar.classList.add("mixer-toolbar");mixerToolbar.querySelector(".toolbar-caption")?.remove();
-const mixerHidden=button("Скрыто: 0",()=>{const id=state?.mixerToolbar?.hidden?.id;if(id)request("control.click",{id});});mixerHidden.className="mixer-hidden";
-const mixerLayout=iconButton("layoutVertical","Вертикальная компоновка",()=>{const id=state?.mixerToolbar?.layoutAction;if(id)request("action.invoke",{id});else invokeName("actionMixerToolbarToggleLayout");});mixerLayout.className="mixer-layout";
+const mixerHidden=button("0 hidden",()=>{const id=state?.mixerToolbar?.hidden?.id;if(id)request("control.click",{id});});mixerHidden.className="mixer-hidden";
+const mixerLayout=iconButton("layoutVertical","Vertical Layout",()=>{const id=state?.mixerToolbar?.layoutAction;if(id)request("action.invoke",{id});else invokeName("actionMixerToolbarToggleLayout");});mixerLayout.className="mixer-layout";
 mixerToolbar.prepend(mixerHidden,mixerLayout);$("advanced-audio").replaceChildren(icon("gear"));
 $("source-tools").addEventListener("click",()=>request("native.command",{id:"source.tools"}));
 $("mixer-menu").addEventListener("click",()=>request("native.command",{id:"audio.options"}));
@@ -701,11 +791,11 @@ document.addEventListener("keydown",event=>{
 const resizer=$("panel-resizer");resizer.hidden=true;
 function resetPanelLayout(){if(state)renderWorkspace(state);scheduleBounds();}
 document.addEventListener("toggle",scheduleBounds,true);
-new ResizeObserver(scheduleBounds).observe($("preview"));new ResizeObserver(scheduleBounds).observe($("program"));
+new ResizeObserver(()=>{syncPreviewTrim();scheduleBounds();}).observe($("preview"));new ResizeObserver(scheduleBounds).observe($("program"));
 new ResizeObserver(()=>{if(state)renderSceneGrid(state);}).observe($("scenes"));
-window.addEventListener("resize",scheduleBounds);window.addEventListener("pagehide",()=>bridge?.dispose());
+window.addEventListener("resize",()=>{syncPreviewTrim();scheduleBounds();});window.addEventListener("pagehide",()=>bridge?.dispose());
 try{bridge=createBridge(window.chrome?.webview);bridge.subscribe("state.changed",render);bridge.subscribe("audio.levels",scheduleLevels);bridge.subscribe("viewport.invalidate",()=>{boundsSignature="";scheduleBounds();});bridge.subscribe("workspace.reset",resetPanelLayout);bridge.subscribe("overlays.dismiss",closeMenus);bridge.subscribe("workspace.panel",data=>{if(!defaultPanelOrder.includes(data?.name))return;panelMode=data.name;document.body.classList.add("floating-panel","native-dock-panel");if(state)renderWorkspace(state);});}
-catch(error){showError(error);$("connection").textContent="Нет соединения с OBS";}
+catch(error){showError(error);$("connection").textContent=tr("WebView2.NoConnection","No connection to OBS");}
 if(bridge)present=createPresentation(bridge);
 if(bridge)bridge.subscribe("workspace.rename",data=>{if((data?.kind==="source"&&panelMode==="sourcesDock")||(data?.kind==="scene"&&panelMode==="scenesDock")){const rows=data.kind==="source"?state?.sources:state?.scenes;const row=rows?.find(row=>data.kind==="source"?keyOf(row)===keyOf(data.row):row.uuid===data.row?.uuid);if(row)rename(data.kind,row);}});
 if(bridge)bridge.subscribe("workspace.rename.finished",finishNativeRename);

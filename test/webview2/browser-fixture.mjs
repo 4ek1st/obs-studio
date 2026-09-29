@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const assets = path.resolve(directory, "../../frontend/webview2/ui");
-const allowed = new Set(["index.html", "app.js", "style.css", "bridge.mjs", "external-drop.mjs"]);
+const allowed = new Set(["index.html", "app.js", "style.css", "bridge.mjs", "external-drop.mjs", "preview-trim.mjs", "localization.mjs"]);
 const server = http.createServer(async (request, response) => {
   try {
     const name = decodeURIComponent(new URL(request.url, "http://localhost").pathname).slice(1) || "index.html";
