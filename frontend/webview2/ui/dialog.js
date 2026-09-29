@@ -617,8 +617,20 @@ function render(state) {
 
 document.addEventListener("keydown", event => {
   if (event.isComposing) return;
+  const settingsSearch = [...controls.values()].find(control => control.data.name === "settingsSearch");
+  if (settingsSearch && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    settingsSearch.element.focus({ preventScroll: true });
+    settingsSearch.element.select();
+    return;
+  }
   const control = event.target.closest(".control");
   const id = control?.dataset.id;
+  if (id === settingsSearch?.data.id && ["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key)) {
+    event.preventDefault(); event.stopPropagation();
+    request("dialog.key", { id, key: event.key, ...modifiers(event) });
+    return;
+  }
   if (event.key === "Tab" && controls.get(id)?.data.itemView && event.target.matches("input,textarea,select")) {
     // Qt delegates use Tab/Backtab to commit and move their model cell.
     event.preventDefault(); event.stopPropagation();

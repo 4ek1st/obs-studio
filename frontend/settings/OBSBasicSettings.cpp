@@ -41,6 +41,8 @@
 #include <properties-view.hpp>
 #include <qt-wrappers.hpp>
 
+#include "SettingsSearchController.hpp"
+
 #include <QCompleter>
 #include <QStandardItemModel>
 
@@ -938,6 +940,8 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	ui->audioMsg->setVisible(false);
 	ui->advancedMsg->setVisible(false);
 	ui->advancedMsg2->setVisible(false);
+
+	new OBSSettingsSearch::Controller(this, ui.get());
 }
 
 OBSBasicSettings::~OBSBasicSettings()

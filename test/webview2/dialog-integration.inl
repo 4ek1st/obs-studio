@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QDialogButtonBox>
+#include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QJsonArray>
@@ -16,6 +17,7 @@
 #include <QLineEdit>
 #include <QKeyEvent>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QMenu>
 #include <QPointer>
 #include <QPushButton>
@@ -37,6 +39,9 @@ class DialogWorkflowChecks : public QObject {
 	bool completed = false;
 	bool originalWarning = false;
 	int settingsCategory = 0;
+	int settingsSearchPhase = 0;
+	bool settingsSearchNavigationDone = false;
+	bool settingsSearchScreenshotCaptured = false;
 
 	void finish()
 	{
@@ -297,6 +302,74 @@ class DialogWorkflowChecks : public QObject {
 		if (!dialog) { fail("settings dialog unexpectedly closed"); return; }
 		OBSWeb::QtDialogBridge bridge(dialog);
 		const auto state = bridge.snapshot();
+		if (!settingsSearchNavigationDone) {
+			const auto search = findNode(state, "name", "settingsSearch");
+			if (search.isEmpty()) { fail("Settings search field is rendered in the HTML dialog"); return; }
+			if (settingsSearchPhase > 0) {
+				const auto suggestions = findNode(state, "name", "settingsSearchResults");
+				check(!suggestions.value("items").toArray().isEmpty(),
+				      "Settings search returns suggestions for an FPS synonym");
+				if (suggestions.value("items").toArray().isEmpty()) { fail("FPS synonym has no settings suggestions"); return; }
+				if (settingsSearchPhase == 3) {
+					bool bitrateFound = false;
+					for (const auto value : suggestions.value("items").toArray()) {
+						const QString title = value.toObject().value("text").toString();
+						bitrateFound |= title.contains(QStringLiteral("bitrate"), Qt::CaseInsensitive) ||
+							title.contains(QStringLiteral("битрейт"), Qt::CaseInsensitive);
+					}
+					check(bitrateFound, "A misspelled bitrate query suggests bitrate settings");
+				}
+			}
+			static const QStringList synonyms{QStringLiteral("fps"), QStringLiteral("кадры"),
+				QStringLiteral("битрет"), QStringLiteral("frame rate")};
+			if (settingsSearchPhase < synonyms.size()) {
+				command(bridge, "dialog.input", {{"id", search.value("id")}, {"value", synonyms[settingsSearchPhase++]}},
+					"HTML Settings search forwards the query to native OBS");
+				const QPointer<QDialog> guard(dialog);
+				QTimer::singleShot(220, this, [this, guard] { settingsPage(guard); });
+				return;
+			}
+			if (!settingsSearchScreenshotCaptured) {
+				settingsSearchScreenshotCaptured = true;
+				const QPointer<QDialog> guard(dialog);
+				capture(dialog, QStringLiteral("OBSBasicSettings-search"), [this, guard] { settingsPage(guard); });
+				return;
+			}
+			const auto suggestions = findNode(state, "name", "settingsSearchResults");
+			const auto list = dialog->findChild<QListWidget *>(QStringLiteral("listWidget"));
+			auto *fpsType = dialog->findChild<QComboBox *>(QStringLiteral("fpsType"));
+			const QString videoCategory = list && list->count() > 5 ? list->item(5)->text() : QString();
+			const QString integerFps = fpsType && fpsType->count() > 1 ? fpsType->itemText(1) : QString();
+			QJsonObject videoSuggestion;
+			for (const auto value : suggestions.value("items").toArray()) {
+				const auto item = value.toObject();
+				if (!videoCategory.isEmpty() && !integerFps.isEmpty() &&
+				    item.value("text").toString().startsWith(integerFps) &&
+				    item.value("text").toString().contains(videoCategory)) {
+					videoSuggestion = item;
+					break;
+				}
+			}
+			if (videoSuggestion.isEmpty()) { fail("FPS suggestions do not include the integer Video FPS option"); return; }
+			command(bridge, "dialog.item", {{"id", suggestions.value("id")}, {"item", videoSuggestion.value("id")}, {"action", "select"}},
+				"Selecting a Settings suggestion opens the corresponding native control");
+			auto *pages = dialog->findChild<QStackedWidget *>(QStringLiteral("settingsPages"));
+			check(pages && pages->currentIndex() == 5, "FPS suggestion opens the Video settings page");
+			check(fpsType && fpsType->currentIndex() == 1, "Integer FPS suggestion reveals the integer FPS editor");
+			command(bridge, "dialog.key", {{"id", search.value("id")}, {"key", "Escape"}},
+				"Escape clears Settings search through the native keyboard path");
+			auto *nativeSearch = dialog->findChild<QLineEdit *>(QStringLiteral("settingsSearch"));
+			check(nativeSearch && nativeSearch->text().isEmpty() && dialog->isVisible(),
+			      "Clearing Settings search keeps the dialog open and restores category navigation");
+			const auto categories = findNode(bridge.snapshot(), "name", "listWidget");
+			const auto firstCategory = categories.value("items").toArray().first().toObject();
+			command(bridge, "dialog.item", {{"id", categories.value("id")}, {"item", firstCategory.value("id")}, {"action", "select"}},
+				"General Settings remains reachable after a search");
+			settingsSearchNavigationDone = true;
+			const QPointer<QDialog> guard(dialog);
+			QTimer::singleShot(180, this, [this, guard] { settingsPage(guard); });
+			return;
+		}
 		if (settingsCategory == 0) {
 			const auto warning = findNode(state, "name", "warnBeforeStreamStart");
 			if (warning.isEmpty()) { fail("General settings warning checkbox is rendered"); return; }
