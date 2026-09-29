@@ -74,5 +74,21 @@ html:not([data-presented]) body{visibility:hidden}
 #studio-controls #tbar{flex:none}
 #context-bar{background:color-mix(in srgb,var(--bg) 94%,var(--text) 6%);border-top:1px solid color-mix(in srgb,var(--bg) 84%,var(--text) 16%)}
 #context-bar button{background:transparent}
-#context-bar button:hover:not(:disabled){background:var(--raised)}
+#context-bar button:hover:not(:disabled){background:color-mix(in srgb,var(--raised) 72%,var(--text) 28%)}
 #context-bar select{background:var(--panel)}
+
+/* Match the dialog surface: every actionable dock control reacts to hover,
+   including the currently selected row or an active output button. */
+button:not(:disabled),.row,select:not(:disabled),input:not(:disabled){transition:background-color 110ms ease,border-color 110ms ease,box-shadow 110ms ease}
+.row[aria-selected=true]:hover{background:color-mix(in srgb,var(--selected) 82%,var(--text) 18%)}
+.toolbar button:hover:not(:disabled),.audio-title button:hover:not(:disabled),.audio-buttons button:hover:not(:disabled),
+.mixer-toolbar button:hover:not(:disabled),#studio-controls button:hover:not(:disabled),#controls button:hover:not(:disabled){
+  background:color-mix(in srgb,var(--raised) 72%,var(--text) 28%)
+}
+#controls .native-control:hover:not(:disabled){background:color-mix(in srgb,var(--control-background,var(--raised)) 72%,var(--text) 28%)}
+button[aria-pressed=true]:hover:not(:disabled),#controls button.active:hover:not(:disabled){
+  background:color-mix(in srgb,var(--selected) 82%,var(--text) 18%)
+}
+select:hover:not(:disabled),input:not([type=range]):hover:not(:disabled){border-color:color-mix(in srgb,var(--focus) 60%,var(--line) 40%)}
+input[type=range]:hover:not(:disabled){filter:brightness(1.18)}
+@media(prefers-reduced-motion:reduce){button:not(:disabled),.row,select:not(:disabled),input:not(:disabled){transition:none}}

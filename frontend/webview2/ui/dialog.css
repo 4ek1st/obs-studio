@@ -91,3 +91,31 @@ button.checked:not(.item-row):not(.expand) { background:var(--qt-highlight); col
 @font-face { font-family:"Open Sans"; src:url("OpenSans-Italic.ttf") format("truetype"); font-style:italic; font-weight:400; font-display:block; }
 /* The host reveals the surface after the first complete web frame. */
 html:not([data-presented]) body { visibility:hidden; }
+
+/* A Qt selection or native-painted control must still acknowledge the pointer. */
+button:not(:disabled),.item-row,.choice,.input-shell,input.text,textarea,select {
+  transition:background-color 110ms ease,border-color 110ms ease,box-shadow 110ms ease;
+}
+.item-row:hover:not([aria-disabled="true"]) { background:color-mix(in srgb,var(--qt-base) 78%,var(--qt-highlight) 22%); }
+.item-row.selected:hover:not([aria-disabled="true"]) { background:color-mix(in srgb,var(--qt-highlight) 82%,var(--qt-highlightedText) 18%); }
+.tabs button.current:hover:not(:disabled),button.checked:hover:not(:disabled) {
+  background:color-mix(in srgb,var(--qt-highlight) 82%,var(--qt-highlightedText) 18%);
+}
+.choice:not(.disabled):hover { background:color-mix(in srgb,var(--qt-window) 84%,var(--qt-highlight) 16%); border-radius:3px; }
+.range:hover:not(:disabled) { filter:brightness(1.2); }
+.input-shell:hover:has(input:not(:disabled)),input.text:hover:not(:disabled),textarea:hover:not(:disabled),
+select:hover:not(:disabled),.combo:hover:has(select:not(:disabled)) select {
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--qt-highlight) 65%,transparent);
+}
+.group.native-decoration legend > button.native-caption:hover:not(:disabled) {
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--qt-highlight) 65%,transparent);
+}
+.control.search-hit { animation:search-hit-pulse 1900ms ease-out both; }
+@keyframes search-hit-pulse {
+  0%,35% { box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--qt-highlight) 78%,transparent),inset 0 0 20px color-mix(in srgb,var(--qt-highlight) 25%,transparent); }
+  100% { box-shadow:inset 0 0 0 0 transparent,inset 0 0 0 transparent; }
+}
+@media (prefers-reduced-motion:reduce) {
+  button:not(:disabled),.item-row,.choice,.input-shell,input.text,textarea,select { transition:none; }
+  .control.search-hit { animation-duration:500ms; }
+}

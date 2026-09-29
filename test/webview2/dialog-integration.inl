@@ -356,18 +356,38 @@ class DialogWorkflowChecks : public QObject {
 			auto *pages = dialog->findChild<QStackedWidget *>(QStringLiteral("settingsPages"));
 			check(pages && pages->currentIndex() == 5, "FPS suggestion opens the Video settings page");
 			check(fpsType && fpsType->currentIndex() == 1, "Integer FPS suggestion reveals the integer FPS editor");
-			command(bridge, "dialog.key", {{"id", search.value("id")}, {"key", "Escape"}},
-				"Escape clears Settings search through the native keyboard path");
-			auto *nativeSearch = dialog->findChild<QLineEdit *>(QStringLiteral("settingsSearch"));
-			check(nativeSearch && nativeSearch->text().isEmpty() && dialog->isVisible(),
-			      "Clearing Settings search keeps the dialog open and restores category navigation");
-			const auto categories = findNode(bridge.snapshot(), "name", "listWidget");
-			const auto firstCategory = categories.value("items").toArray().first().toObject();
-			command(bridge, "dialog.item", {{"id", categories.value("id")}, {"item", firstCategory.value("id")}, {"action", "select"}},
-				"General Settings remains reachable after a search");
-			settingsSearchNavigationDone = true;
 			const QPointer<QDialog> guard(dialog);
-			QTimer::singleShot(180, this, [this, guard] { settingsPage(guard); });
+			QTimer::singleShot(120, this, [this, guard] {
+				if (!guard) { fail("Settings dialog closed before destination highlight"); return; }
+				OBSWeb::QtDialogBridge revealed(guard);
+				auto *fps = guard->findChild<QComboBox *>(QStringLiteral("fpsType"));
+				check(fps && fps->property("_obsSettingsSearchHit").toBool(),
+				      "Search destination is marked briefly on the native Settings control");
+				check(findNode(revealed.snapshot(), "name", "fpsType").value("searchHit").toBool(),
+				      "WebView2 receives the destination highlight state");
+				capture(guard, QStringLiteral("OBSBasicSettings-search-hit"), [this, guard] {
+					QTimer::singleShot(1750, this, [this, guard] {
+						if (!guard) { fail("Settings dialog closed before highlight cleared"); return; }
+						OBSWeb::QtDialogBridge current(guard);
+						const auto refreshed = current.snapshot();
+						auto *fps = guard->findChild<QComboBox *>(QStringLiteral("fpsType"));
+						check(fps && !fps->property("_obsSettingsSearchHit").toBool(),
+						      "Search destination highlight clears after its brief pulse");
+						const auto searchNode = findNode(refreshed, "name", "settingsSearch");
+						command(current, "dialog.key", {{"id", searchNode.value("id")}, {"key", "Escape"}},
+							"Escape clears Settings search through the native keyboard path");
+						auto *nativeSearch = guard->findChild<QLineEdit *>(QStringLiteral("settingsSearch"));
+						check(nativeSearch && nativeSearch->text().isEmpty() && guard->isVisible(),
+						      "Clearing Settings search keeps the dialog open and restores category navigation");
+						const auto categories = findNode(current.snapshot(), "name", "listWidget");
+						const auto firstCategory = categories.value("items").toArray().first().toObject();
+						command(current, "dialog.item", {{"id", categories.value("id")}, {"item", firstCategory.value("id")}, {"action", "select"}},
+							"General Settings remains reachable after a search");
+						settingsSearchNavigationDone = true;
+						QTimer::singleShot(180, this, [this, guard] { settingsPage(guard); });
+					});
+				});
+			});
 			return;
 		}
 		if (settingsCategory == 0) {

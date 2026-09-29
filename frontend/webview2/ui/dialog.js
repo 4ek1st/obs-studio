@@ -419,6 +419,7 @@ function updateItems(control, data) {
 
 function updateControl(control, data) {
   place(control, data.rect);
+  control.classList.toggle("search-hit", !!data.searchHit);
   if (data.palette) {
     applyTheme(data.palette, control.style);
     control.dataset.themed = "true";

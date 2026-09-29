@@ -473,6 +473,7 @@ struct QtDialogBridge::Impl {
 				{"class", QString::fromLatin1(widget->metaObject()->className())},
 				{"rect", rectangle(QRect(widget->mapTo(dialog, QPoint()), widget->size()))},
 				{"clip", rectangle(clipped)}, {"enabled", widget->isEnabled()},
+				{"searchHit", widget->property("_obsSettingsSearchHit").toBool()},
 				{"tooltip", plainText(widget->toolTip())}, {"accessibleName", widget->accessibleName()},
 				{"font", fontState(widget)}, {"palette", paletteState(widget)}};
 			bool atomic = true;

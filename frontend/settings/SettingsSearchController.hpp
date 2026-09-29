@@ -143,6 +143,22 @@ class Controller final : public QObject {
 	QListWidget *results;
 	QTimer *updateTimer;
 	QVector<Entry> entries;
+	QPointer<QWidget> highlighted;
+	int highlightGeneration = 0;
+
+	void highlight(QWidget *widget)
+	{
+		if (highlighted) highlighted->setProperty("_obsSettingsSearchHit", false);
+		highlighted = widget;
+		if (!highlighted) return;
+		highlighted->setProperty("_obsSettingsSearchHit", true);
+		const int generation = ++highlightGeneration;
+		QTimer::singleShot(1900, this, [this, generation] {
+			if (generation != highlightGeneration || !highlighted) return;
+			highlighted->setProperty("_obsSettingsSearchHit", false);
+			highlighted.clear();
+		});
+	}
 
 	bool available(QWidget *widget, QWidget *page) const
 	{
@@ -305,10 +321,17 @@ class Controller final : public QObject {
 				}
 			}
 		}
-		QTimer::singleShot(0, dialog, [target] {
+		QTimer::singleShot(0, this, [this, target] {
 			if (!target) return;
-			for (auto *parent = target->parentWidget(); parent; parent = parent->parentWidget())
-				if (auto *area = qobject_cast<QScrollArea *>(parent)) { area->ensureWidgetVisible(target, 20, 20); break; }
+			QWidget *destination = target;
+			if (target == ui->settingsPages->currentWidget()) {
+				for (auto *group : target->findChildren<QGroupBox *>()) {
+					if (group->isVisibleTo(dialog) && !group->title().isEmpty()) { destination = group; break; }
+				}
+			}
+			for (auto *parent = destination->parentWidget(); parent; parent = parent->parentWidget())
+				if (auto *area = qobject_cast<QScrollArea *>(parent)) { area->ensureWidgetVisible(destination, 20, 20); break; }
+			if (destination->isVisibleTo(dialog)) highlight(destination);
 			if (target->isVisible() && target->isEnabled() && target->focusPolicy() != Qt::NoFocus)
 				target->setFocus(Qt::ShortcutFocusReason);
 		});
