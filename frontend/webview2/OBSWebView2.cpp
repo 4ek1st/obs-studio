@@ -89,6 +89,7 @@
 #include "../../test/webview2/tool-data-integration.inl"
 #include "../../test/webview2/parity-audit.inl"
 #include "../../test/webview2/plugin-audit.inl"
+#include "../../test/webview2/window-drop-integration.inl"
 #endif
 
 namespace {

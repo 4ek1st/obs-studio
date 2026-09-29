@@ -1257,6 +1257,9 @@ void OBSBasic::OnFirstLoad()
 #ifdef WEBVIEW2_AVAILABLE
 	InstallWebView2Frontend(this);
 #endif
+#ifdef _WIN32
+	InstallWindowMoveCapture();
+#endif
 	OnEvent(OBS_FRONTEND_EVENT_FINISHED_LOADING);
 
 #ifdef WHATSNEW_ENABLED
@@ -1283,6 +1286,9 @@ OBSBasic::~OBSBasic() {}
 
 void OBSBasic::applicationShutdown() noexcept
 {
+#ifdef _WIN32
+	delete findChild<QObject *>(QStringLiteral("obsMovedWindowDrop"));
+#endif
 #ifdef WEBVIEW2_AVAILABLE
 	ShutdownWebView2Frontend(this);
 #endif

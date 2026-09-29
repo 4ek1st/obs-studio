@@ -75,6 +75,15 @@ void runIntegrationChecks()
 		});
 		return;
 	}
+	if (QCoreApplication::arguments().contains(QStringLiteral("--webview2-window-drop-test"))) {
+		RunWindowDropChecks(static_cast<OBSBasic *>(main), preview, check, [this, fixture] {
+			QFile report(QDir(qEnvironmentVariable("OBS_WEBVIEW2_TEST_ARTIFACTS")).filePath("window-drop-report.json"));
+			if (report.open(QIODevice::WriteOnly)) report.write(QJsonDocument(fixture->checks).toJson());
+			config_set_bool(obs_frontend_get_user_config(), "General", "ConfirmOnExit", false);
+			QTimer::singleShot(200, main, &QWidget::close);
+		});
+		return;
+	}
 	if (!fixture->first || !fixture->second || !fixture->a || !fixture->b) {
 		blog(LOG_ERROR, "[WebView2 test] Could not create fixtures");
 		return;

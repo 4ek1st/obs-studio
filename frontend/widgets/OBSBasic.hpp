@@ -478,6 +478,10 @@ private:
 	void AddDropSource(const char *file, DropType image);
 	void AddDropURL(QUrl url, QString &name, obs_data_t *settings, const obs_video_info &ovi);
 	void ConfirmDropUrl(const QString &url);
+#ifdef _WIN32
+	void InstallWindowMoveCapture();
+	void AddMovedWindowCapture(void *window);
+#endif
 	void dragEnterEvent(QDragEnterEvent *event) override;
 	void dragLeaveEvent(QDragLeaveEvent *event) override;
 	void dragMoveEvent(QDragMoveEvent *event) override;

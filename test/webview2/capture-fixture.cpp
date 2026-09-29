@@ -9,6 +9,13 @@
 using Microsoft::WRL::ComPtr;
 static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+	if (message == WM_APP + 10) {
+		NotifyWinEvent(EVENT_SYSTEM_MOVESIZESTART, window, OBJID_WINDOW, CHILDID_SELF);
+		SetWindowPos(window, nullptr, int(wparam), int(lparam), 0, 0,
+			     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+		NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND, window, OBJID_WINDOW, CHILDID_SELF);
+		return 0;
+	}
 	if (message == WM_CLOSE) { DestroyWindow(window); return 0; }
 	if (message == WM_DESTROY) { PostQuitMessage(0); return 0; }
 	return DefWindowProcW(window, message, wparam, lparam);
