@@ -10,7 +10,7 @@
 
 namespace twitch {
 
-static const QString scope = QStringLiteral("channel:read:stream_key");
+static const QString scope = QStringLiteral("channel:read:stream_key channel:manage:broadcast chat:read chat:edit");
 
 static QByteArray form(std::initializer_list<QPair<QString, QString>> fields)
 {
@@ -180,8 +180,9 @@ void DeviceFlow::acceptTokens(const QJsonObject &json)
 	saved.accessToken = access;
 	saved.refreshToken = refresh;
 	saved.expiresAt = QDateTime::currentSecsSinceEpoch() + seconds;
-	// Public-client refresh tokens are single-use. Persist the replacement before any further request.
-	emit credentialsChanged();
+	// A rotated refresh token is single-use, so persist it before validation.
+	// New consent has no prior token to rotate and must pass scope validation first.
+	if (refreshing) emit credentialsChanged();
 	validate();
 }
 
@@ -218,9 +219,17 @@ void DeviceFlow::validate()
 		const auto id = json["user_id"].toString();
 		const auto login = json["login"].toString();
 		if (json["client_id"].toString() != saved.clientId || id.isEmpty() || login.isEmpty() ||
-		    (!saved.userId.isEmpty() && saved.userId != id) || !scopes.contains(scope)) {
-			fail(tr("The Twitch session does not belong to this application or lacks streaming permission. Connect again."), true);
+		    (!saved.userId.isEmpty() && saved.userId != id)) {
+			fail(tr("The Twitch session does not belong to this application. Connect again."), true);
 			return;
+		}
+		for (const auto &required : scope.split(' ')) {
+			if (!scopes.contains(required)) {
+				const QString message = tr("Reconnect Twitch to approve chat and stream-information permissions.");
+				fail(message);
+				emit permissionsRequired(message);
+				return;
+			}
 		}
 		saved.userId = id;
 		saved.login = login;

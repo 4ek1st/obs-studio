@@ -21,6 +21,7 @@ class TwitchAuth : public OAuthStreamKey {
 	QString deviceSessionId;
 	bool needsReconnect = false;
 	bool keyInvalidated = false;
+	bool deviceVerified = false;
 	bool DeviceLogin(QWidget *parent);
 	void RequireReconnect(const QString &message, bool invalidateSession);
 #endif

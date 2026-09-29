@@ -43,6 +43,7 @@ signals:
 	void credentialsChanged();
 	void authenticated();
 	void failed(const QString &message, bool reauthorize);
+	void permissionsRequired(const QString &message);
 
 private:
 	using Response = std::function<void(int, const QJsonObject &)>;

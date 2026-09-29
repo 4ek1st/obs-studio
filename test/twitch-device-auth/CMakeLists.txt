@@ -25,6 +25,24 @@ target_include_directories(twitch-device-dialog-test PRIVATE ../../frontend/oaut
 target_link_libraries(twitch-device-dialog-test PRIVATE Qt6::Network Qt6::Widgets)
 add_test(NAME twitch-device-dialog COMMAND twitch-device-dialog-test)
 set_tests_properties(twitch-device-dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=minimal" TIMEOUT 25)
+add_executable(twitch-native-docks-test
+  twitch-native-docks-test.cpp
+  ../../frontend/oauth/TwitchNativeDocks.cpp
+  ../../frontend/oauth/TwitchNativeDocks.hpp
+)
+target_include_directories(twitch-native-docks-test PRIVATE ../../frontend/oauth)
+target_link_libraries(twitch-native-docks-test PRIVATE Qt6::Network Qt6::Widgets)
+add_test(NAME twitch-native-docks COMMAND twitch-native-docks-test)
+set_tests_properties(twitch-native-docks PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=minimal" TIMEOUT 25)
+add_executable(twitch-native-docks-live
+  twitch-native-docks-live.cpp
+  ../../frontend/oauth/TwitchNativeDocks.cpp
+  ../../frontend/oauth/TwitchNativeDocks.hpp
+  ../../frontend/oauth/TwitchTokenStore.cpp
+)
+target_include_directories(twitch-native-docks-live PRIVATE ../../frontend/oauth)
+target_compile_definitions(twitch-native-docks-live PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(twitch-native-docks-live PRIVATE Qt6::Network Qt6::Widgets crypt32)
 add_executable(twitch-live-check twitch-live-check.cpp
   ../../frontend/oauth/TwitchDeviceFlow.cpp ../../frontend/oauth/TwitchDeviceFlow.hpp
   ../../frontend/oauth/TwitchTokenStore.cpp)

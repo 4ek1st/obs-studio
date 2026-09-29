@@ -12,6 +12,7 @@ if((ENABLE_TWITCH_DEVICE_AUTH OR (TWITCH_CLIENTID AND TWITCH_HASH MATCHES "^(0|[
       obs-studio PRIVATE
       oauth/TwitchDeviceFlow.cpp oauth/TwitchDeviceFlow.hpp
       oauth/TwitchDeviceLogin.cpp oauth/TwitchDeviceLogin.hpp
+      oauth/TwitchNativeDocks.cpp oauth/TwitchNativeDocks.hpp
       oauth/TwitchTokenStore.cpp oauth/TwitchTokenStore.hpp
     )
     target_compile_definitions(obs-studio PRIVATE TWITCH_DEVICE_AUTH)

@@ -13,6 +13,7 @@
 #include <QUuid>
 #ifdef TWITCH_DEVICE_AUTH
 #include "TwitchDeviceLogin.hpp"
+#include "TwitchNativeDocks.hpp"
 #include "TwitchTokenStore.hpp"
 #include <QDesktopServices>
 #endif
@@ -55,11 +56,16 @@ TwitchAuth::TwitchAuth(const Def &d) : OAuthStreamKey(d)
 		name = credentials.login.toStdString();
 		token = credentials.accessToken.toStdString();
 		refresh_token = credentials.refreshToken.toStdString();
+		if (auto chat = dynamic_cast<twitch::ChatDock *>(OBSBasic::Get()->findChild<QDockWidget *>(TWITCH_CHAT_DOCK_NAME)))
+			chat->setCredentials(credentials);
+		if (auto info = dynamic_cast<twitch::StreamInfoDock *>(OBSBasic::Get()->findChild<QDockWidget *>(TWITCH_INFO_DOCK_NAME)))
+			info->setCredentials(credentials);
 		if (OBSBasic::Get()->GetAuth() == this) Auth::Save();
 	});
 	connect(&deviceFlow, &twitch::DeviceFlow::authenticated, this, [this] {
 		needsReconnect = false;
 		keyInvalidated = false;
+		deviceVerified = true;
 		key_ = deviceFlow.streamKey().toStdString();
 		if (OBSBasic::Get()->GetAuth() == this) {
 			OAuthStreamKey::OnStreamConfig();
@@ -72,6 +78,8 @@ TwitchAuth::TwitchAuth(const Def &d) : OAuthStreamKey(d)
 		blog(LOG_WARNING, "Twitch device authorization: %s", QT_TO_UTF8(message));
 		if (reauthorize) RequireReconnect(message, true);
 	});
+	connect(&deviceFlow, &twitch::DeviceFlow::permissionsRequired, this,
+		[this](const QString &) { RequireReconnect(QTStr("TwitchAuth.Device.PermissionsRequired"), false); });
 #endif
 	if (!cef) {
 		return;
@@ -287,7 +295,39 @@ void TwitchAuth::LoadUI()
 {
 #ifdef TWITCH_DEVICE_AUTH
 	if (OBSBasic::Get()->GetAuth() == this && !deviceFlow.credentials().refreshToken.isEmpty()) Auth::Save();
-#endif
+	if (!deviceVerified || uiLoaded || deviceFlow.credentials().accessToken.isEmpty() ||
+	    deviceFlow.credentials().login.isEmpty()) return;
+	OBSBasic *main = OBSBasic::Get();
+	const bool existingNativeLayout = config_get_bool(main->Config(), service(), "NativeDocksInitialized");
+	auto translate = [](const char *key) { return QTStr(key); };
+	auto chat = new twitch::ChatDock(main, translate);
+	chat->setObjectName(TWITCH_CHAT_DOCK_NAME);
+	chat->resize(320, 600);
+	main->AddDockWidget(chat, Qt::RightDockWidgetArea);
+	auto info = new twitch::StreamInfoDock(QUrl("https://api.twitch.tv/helix/"), main, translate);
+	info->setObjectName(TWITCH_INFO_DOCK_NAME);
+	info->resize(360, 440);
+	main->AddDockWidget(info, Qt::RightDockWidgetArea);
+	chat->setCredentials(deviceFlow.credentials());
+	info->setCredentials(deviceFlow.credentials());
+	if (existingNativeLayout) {
+		const char *dockStateStr = config_get_string(main->Config(), service(), "DockState");
+		main->restoreState(QByteArray::fromBase64(QByteArray(dockStateStr ? dockStateStr : "")));
+	} else {
+		const QPoint origin = main->pos();
+		const QSize size = main->frameSize();
+		chat->setFloating(true);
+		info->setFloating(true);
+		chat->move(origin.x() + size.width() - chat->width() - 40, origin.y() + 50);
+		info->move(origin.x() + 40, origin.y() + 50);
+		chat->show();
+		info->show();
+		config_set_bool(main->Config(), service(), "NativeDocksInitialized", true);
+	}
+	uiLoaded = true;
+	Auth::Save();
+	return;
+#else
 	if (!cef) {
 		return;
 	}
@@ -375,6 +415,7 @@ void TwitchAuth::LoadUI()
 	TryLoadSecondaryUIPanes();
 
 	uiLoaded = true;
+#endif
 }
 
 void TwitchAuth::LoadSecondaryUIPanes()
@@ -580,6 +621,7 @@ void TwitchAuth::RequireReconnect(const QString &message, bool invalidateSession
 {
 	needsReconnect = true;
 	keyInvalidated = invalidateSession;
+	deviceVerified = false;
 	key_.clear();
 	deviceFlow.cancel();
 	if (invalidateSession && !deviceSessionId.isEmpty()) deviceSessionStore().remove(deviceSessionId);

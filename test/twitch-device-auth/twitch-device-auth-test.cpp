@@ -56,15 +56,16 @@ private:
 };
 
 static const QString clientId = QStringLiteral("testclient012345678901234567890");
+static const QString requestedScopes = QStringLiteral("channel:read:stream_key channel:manage:broadcast chat:read chat:edit");
 static QJsonObject tokens(QString refresh = QStringLiteral("refresh+/=%second"))
 {
 	return {{"access_token", "access-second"}, {"refresh_token", refresh}, {"expires_in", 14400},
-		{"token_type", "bearer"}, {"scope", QJsonArray{"channel:read:stream_key"}}};
+		{"token_type", "bearer"}, {"scope", QJsonArray{"channel:read:stream_key", "channel:manage:broadcast", "chat:read", "chat:edit"}}};
 }
 static QJsonObject validation(QString id = clientId)
 {
 	return {{"client_id", id}, {"login", "example_streamer"}, {"user_id", "12345"},
-		{"expires_in", 14000}, {"scopes", QJsonArray{"channel:read:stream_key"}}};
+		{"expires_in", 14000}, {"scopes", QJsonArray{"channel:read:stream_key", "channel:manage:broadcast", "chat:read", "chat:edit"}}};
 }
 
 struct Request {
@@ -158,7 +159,7 @@ public:
 		QCOMPARE(server.requests[0].method, "POST");
 		QUrlQuery device(QString::fromUtf8(server.requests[0].body));
 		QCOMPARE(device.queryItemValue("client_id"), clientId);
-		QCOMPARE(device.queryItemValue("scopes", QUrl::FullyDecoded), "channel:read:stream_key");
+		QCOMPARE(device.queryItemValue("scopes", QUrl::FullyDecoded), requestedScopes);
 		QUrlQuery poll(QString::fromUtf8(server.requests[1].body));
 		QCOMPARE(poll.queryItemValue("grant_type", QUrl::FullyDecoded), "urn:ietf:params:oauth:grant-type:device_code");
 		QCOMPARE(poll.queryItemValue("device_code"), "private-device-code");
@@ -269,9 +270,12 @@ public:
 		server.respond = [](const Request &) { return Response{503, {{"message", "unavailable"}}}; };
 		DeviceFlow flow(server.endpoints());
 		QSignalSpy failure(&flow, &DeviceFlow::failed);
+		bool upgradePrompted = false;
+		connect(&flow, &DeviceFlow::permissionsRequired, &flow, [&](const QString &) { upgradePrompted = true; });
 		flow.restore({clientId, "access-old", "refresh-old", "example_streamer", "12345", 1});
 		QTRY_COMPARE(failure.count(), 1);
 		QVERIFY(!failure[0][1].toBool());
+		QVERIFY(!upgradePrompted);
 		QCOMPARE(flow.credentials().refreshToken, "refresh-old");
 	}
 	void tokenForDifferentAppOrMissingScopeNeverFetchesStreamKey()
@@ -290,6 +294,46 @@ public:
 			QCOMPARE(server.requests.size(), 1);
 			QVERIFY(flow.streamKey().isEmpty());
 		}
+	}
+	void oldStreamKeyOnlyConsentRequiresUpgradeWithoutDeletingSession()
+	{
+		Server server;
+		server.respond = [&](const Request &r) {
+			if (r.path == "/validate") {
+				auto result = validation();
+				result["scopes"] = QJsonArray{"channel:read:stream_key"};
+				return Response{200, result};
+			}
+			return server.normal(r);
+		};
+		DeviceFlow flow(server.endpoints());
+		QSignalSpy failure(&flow, &DeviceFlow::failed);
+		bool upgradePrompted = false;
+		connect(&flow, &DeviceFlow::permissionsRequired, &flow, [&](const QString &) { upgradePrompted = true; });
+		flow.restore({clientId, "access-old", "refresh-old", "example_streamer", "12345", 1});
+		QTRY_COMPARE(failure.count(), 1);
+		QVERIFY(!failure[0][1].toBool());
+		QVERIFY(upgradePrompted);
+		QCOMPARE(flow.credentials().refreshToken, "refresh-old");
+		QCOMPARE(server.requests.size(), 1);
+	}
+	void newConsentIsNotPublishedUntilScopesAreValidated()
+	{
+		Server server;
+		server.respond = [&](const Request &r) {
+			if (r.path == "/validate") {
+				auto result = validation();
+				result["scopes"] = QJsonArray{"channel:read:stream_key"};
+				return Response{200, result};
+			}
+			return server.normal(r);
+		};
+		DeviceFlow flow(server.endpoints());
+		QSignalSpy changed(&flow, &DeviceFlow::credentialsChanged), failure(&flow, &DeviceFlow::failed);
+		flow.begin(clientId);
+		QTRY_COMPARE_WITH_TIMEOUT(failure.count(), 1, 5000);
+		QCOMPARE(changed.count(), 0);
+		QCOMPARE(server.requests.size(), 3);
 	}
 	void encryptedStorageRoundTripsAndRejectsCorruption()
 	{
@@ -354,6 +398,8 @@ int main(int argc, char **argv)
 	RUN(expiredTokenDuringKeyRequestRefreshesOnce);
 	RUN(networkFailurePreservesRefreshCredentials);
 	RUN(tokenForDifferentAppOrMissingScopeNeverFetchesStreamKey);
+	RUN(oldStreamKeyOnlyConsentRequiresUpgradeWithoutDeletingSession);
+	RUN(newConsentIsNotPublishedUntilScopesAreValidated);
 	RUN(encryptedStorageRoundTripsAndRejectsCorruption);
 	RUN(copiedProfileReferencesReadTheLatestRotatedSession);
 	return failures ? 1 : 0;

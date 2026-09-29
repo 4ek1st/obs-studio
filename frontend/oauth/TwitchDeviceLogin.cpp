@@ -23,7 +23,7 @@ DeviceLogin::DeviceLogin(DeviceFlow &flow, const QString &clientId, QWidget *par
 	auto layout = new QVBoxLayout(this);
 	layout->setContentsMargins(24, 24, 24, 24);
 	layout->setSpacing(14);
-	auto description = new QLabel(text("TwitchAuth.Device.Description", "Confirm the connection on Twitch in your browser. OBS will receive your stream key automatically."), this);
+	auto description = new QLabel(text("TwitchAuth.Device.Description", "Confirm the connection on Twitch in your browser. OBS will receive your stream key and access your chat and stream information."), this);
 	description->setWordWrap(true);
 	layout->addWidget(description);
 	auto applicationLabel = new QLabel(text("TwitchAuth.Device.ClientId", "Twitch application Client ID (Public)"), this);
